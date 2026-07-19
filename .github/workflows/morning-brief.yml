@@ -1,0 +1,47 @@
+name: Commodity & Risk Morning Brief
+
+on:
+  schedule:
+    # 07:30 Asia/Shanghai, Monday through Friday. GitHub Actions cron uses UTC.
+    - cron: "30 23 * * 0-4"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: commodity-risk-morning-brief
+  cancel-in-progress: false
+
+jobs:
+  deliver:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TIMEZONE: Asia/Shanghai
+      AI_API_KEY: ${{ secrets.AI_API_KEY }}
+      DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+      SCHOLAR_IMAP_HOST: ${{ secrets.SCHOLAR_IMAP_HOST }}
+      SCHOLAR_IMAP_PORT: ${{ secrets.SCHOLAR_IMAP_PORT }}
+      SCHOLAR_IMAP_USERNAME: ${{ secrets.SCHOLAR_IMAP_USERNAME }}
+      SCHOLAR_IMAP_PASSWORD: ${{ secrets.SCHOLAR_IMAP_PASSWORD }}
+      SCHOLAR_IMAP_FOLDER: INBOX
+      SCHOLAR_SENDER: scholaralerts-noreply@google.com
+      FT_FEED_URL: ${{ secrets.FT_FEED_URL }}
+      FT_EMAIL_SENDER: ${{ secrets.FT_EMAIL_SENDER }}
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install runtime dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Collect, analyse, and deliver the morning brief
+        run: python -m app.cli run-once

@@ -1,4 +1,4 @@
-"""Typed records exchanged between ingestion, analysis, storage, and delivery."""
+"""Typed records exchanged between ingestion, analysis, and delivery."""
 
 from __future__ import annotations
 
@@ -24,6 +24,9 @@ class ContentItem(BaseModel):
     title: str = Field(min_length=1, max_length=500)
     url: str = Field(min_length=1, max_length=2_000)
     summary: str = Field(default="", max_length=8_000)
+    # Kept in memory for this run only. It is deliberately excluded from the
+    # duplicate checksum so a changed extraction does not create a new story.
+    article_text: str = Field(default="", max_length=16_000)
     published_at: datetime
     retrieved_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -47,14 +50,18 @@ class ContentItem(BaseModel):
         return hashlib.sha256(self.url.strip().lower().encode("utf-8")).hexdigest()
 
 
-class BriefItem(BaseModel):
+class ArticleAnalysis(BaseModel):
+    """A traceable, detailed interpretation of one original article."""
+
     title: str = Field(min_length=1, max_length=300)
     source: str = Field(min_length=1, max_length=120)
     url: str = Field(min_length=1, max_length=2_000)
     published_at: datetime
-    what_happened: str = Field(min_length=1, max_length=700)
-    why_it_matters: str = Field(min_length=1, max_length=700)
-    market_impact: str = Field(min_length=1, max_length=500)
+    core_thesis: str = Field(min_length=1, max_length=1_000)
+    fact_chain: list[str] = Field(min_length=1, max_length=6)
+    detailed_reading: str = Field(min_length=80, max_length=4_000)
+    transmission_or_risk: list[str] = Field(min_length=1, max_length=4)
+    limits_and_next_checks: list[str] = Field(default_factory=list, max_length=4)
 
     @field_validator("published_at")
     @classmethod
@@ -64,79 +71,33 @@ class BriefItem(BaseModel):
         return value.astimezone(timezone.utc)
 
 
-class ResearchBrief(BaseModel):
-    title: str = Field(min_length=1, max_length=300)
-    source: str = Field(min_length=1, max_length=120)
-    url: str = Field(min_length=1, max_length=2_000)
-    published_at: datetime
-    research_question: str = Field(min_length=1, max_length=500)
-    key_finding: str = Field(min_length=1, max_length=700)
-    practical_implication: str = Field(min_length=1, max_length=500)
-
-    @field_validator("published_at")
-    @classmethod
-    def utc_datetime(cls, value: datetime) -> datetime:
-        if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc)
-
-
-class DailyBrief(BaseModel):
+class DeepReadingReport(BaseModel):
     report_date: date
-    key_judgements: list[str] = Field(min_length=1, max_length=2)
-    commodity_items: list[BriefItem] = Field(default_factory=list, max_length=3)
-    risk_items: list[BriefItem] = Field(default_factory=list, max_length=2)
-    research_item: ResearchBrief | None = None
-    disclaimer: str = "本简报仅供研究参考，不构成投资建议。"
+    analyses: list[ArticleAnalysis] = Field(min_length=1, max_length=5)
+    disclaimer: str = "本文仅供研究参考，不构成投资建议。"
 
     def to_markdown(self) -> str:
-        lines = [f"# 商品与风控情报晨报｜{self.report_date.isoformat()}", ""]
-        lines.append("## 核心判断")
-        for index, judgement in enumerate(self.key_judgements, start=1):
-            lines.append(f"{index}. {judgement}")
-
-        def add_item(item: BriefItem) -> None:
-            published = item.published_at.date().isoformat()
+        lines = [f"# 商品与风控情报：深度阅读（{self.report_date.isoformat()}）", ""]
+        for index, item in enumerate(self.analyses, start=1):
             lines.extend(
                 [
-                    f"### [{item.title}]({item.url})",
-                    f"来源：{item.source}｜发布日期：{published}",
-                    f"- 发生了什么：{item.what_happened}",
-                    f"- 为何重要：{item.why_it_matters}",
-                    f"- 市场影响：{item.market_impact}",
+                    f"## {index}. {item.title}",
+                    f"来源：{item.source}｜发布日期：{item.published_at.date().isoformat()}｜[阅读原文]({item.url})",
+                    "",
+                    "### 核心命题",
+                    item.core_thesis,
+                    "",
+                    "### 事实链",
                 ]
             )
-
-        lines.extend(["", "## 商品与期货"])
-        if self.commodity_items:
-            for item in self.commodity_items:
-                add_item(item)
-        else:
-            lines.append("今日没有通过筛选的商品与期货新情报。")
-
-        lines.extend(["", "## 财务舞弊与内部控制"])
-        if self.risk_items:
-            for item in self.risk_items:
-                add_item(item)
-        else:
-            lines.append("今日没有通过筛选的财务舞弊或内控新情报。")
-
-        lines.extend(["", "## 论文雷达"])
-        if self.research_item:
-            item = self.research_item
-            lines.extend(
-                [
-                    f"### [{item.title}]({item.url})",
-                    f"来源：{item.source}｜发布日期：{item.published_at.date().isoformat()}",
-                    f"- 研究问题：{item.research_question}",
-                    f"- 核心发现：{item.key_finding}",
-                    f"- 实践启示：{item.practical_implication}",
-                ]
-            )
-        else:
-            lines.append("今日未收到新的相关 Scholar Alert，故不提供论文解读。")
-
-        lines.extend(["", "---", self.disclaimer])
+            lines.extend(f"- {fact}" for fact in item.fact_chain)
+            lines.extend(["", "### 深度解读", item.detailed_reading, "", "### 影响传导与风险观察"])
+            lines.extend(f"- {entry}" for entry in item.transmission_or_risk)
+            if item.limits_and_next_checks:
+                lines.extend(["", "### 反证、局限与后续核验"])
+                lines.extend(f"- {entry}" for entry in item.limits_and_next_checks)
+            lines.append("")
+        lines.extend(["---", self.disclaimer])
         return "\n".join(lines)
 
     def to_json(self) -> str:

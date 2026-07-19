@@ -13,7 +13,7 @@ from .config import Settings
 from .dingtalk import DingTalkNotifier
 from .models import ContentItem
 from .scoring import score_item, select_candidates
-from .sources import Source, build_sources
+from .sources import PublicArticleReader, Source, build_sources
 
 
 logger = logging.getLogger(__name__)
@@ -25,6 +25,7 @@ class RunResult:
     report_date: str
     collected_count: int = 0
     candidate_count: int = 0
+    readable_count: int = 0
     source_failures: list[str] = field(default_factory=list)
     error: str | None = None
 
@@ -33,7 +34,7 @@ class RunResult:
 
 
 class BriefService:
-    """Run one morning brief entirely in memory.
+    """Run one deep-reading report entirely in memory.
 
     GitHub-hosted runners are ephemeral, so this service intentionally stores no source
     excerpts, credentials, delivery logs, or cross-run database state. It limits the source
@@ -46,11 +47,17 @@ class BriefService:
         sources: list[Source] | None = None,
         generator: BriefGenerator | None = None,
         notifier: DingTalkNotifier | None = None,
+        article_reader: PublicArticleReader | None = None,
     ) -> None:
         self.settings = settings
         self.sources = sources if sources is not None else build_sources(settings)
         self.generator = generator if generator is not None else OpenAICompatibleBriefGenerator(settings)
         self.notifier = notifier if notifier is not None else DingTalkNotifier(settings)
+        self.article_reader = (
+            article_reader
+            if article_reader is not None
+            else PublicArticleReader(settings.extra_article_domains)
+        )
         self._run_lock = asyncio.Lock()
 
     async def run_once(self, now: datetime | None = None) -> RunResult:
@@ -79,10 +86,16 @@ class BriefService:
         result.collected_count = len(collected)
         candidates = select_candidates(list(collected.values()))
         result.candidate_count = len(candidates)
+        try:
+            candidates = await self.article_reader.enrich(candidates)
+            result.readable_count = sum(bool(item.article_text) for item in candidates)
+        except Exception as exc:
+            logger.warning("public article reading failed: %s", exc)
+            result.source_failures.append(f"Public article reader: {exc}")
 
         try:
-            brief = await self.generator.generate(report_date, candidates)
-            await self.notifier.send_brief(brief)
+            report = await self.generator.generate(report_date, candidates)
+            await self.notifier.send_report(report)
             result.status = "success"
             return result
         except Exception as exc:
@@ -99,7 +112,7 @@ class BriefService:
 
     async def _notify_fault_safely(self, error: str) -> None:
         try:
-            await self.notifier.send_fault(f"简报未生成：{error[:1_000]}")
+            await self.notifier.send_fault(f"深度阅读报告未生成：{error[:1_000]}")
         except Exception as notification_error:
             logger.error("could not send DingTalk fault notification: %s", notification_error)
 

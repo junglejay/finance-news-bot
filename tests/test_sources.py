@@ -1,9 +1,22 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 
-from app.sources import parse_newsletter_message, parse_pcaob_listing, parse_scholar_message, parse_sec_listing
+import pytest
+import respx
+from httpx import Response
+
+from app.models import ContentItem
+from app.sources import (
+    PublicArticleReader,
+    build_sources,
+    parse_newsletter_message,
+    parse_pcaob_listing,
+    parse_scholar_message,
+    parse_sec_listing,
+)
 
 
 def test_parse_sec_listing_extracts_recent_public_notices() -> None:
@@ -75,3 +88,51 @@ def test_parse_authorised_ft_newsletter_keeps_metadata_and_links() -> None:
     assert len(items) == 1
     assert items[0].source == "Financial Times"
     assert items[0].title == "Oil market outlook"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_public_article_reader_extracts_allowed_public_article() -> None:
+    item = ContentItem(
+        source="U.S. EIA Today in Energy",
+        title="Oil inventory update",
+        url="https://www.eia.gov/todayinenergy/detail.php?id=123",
+        published_at=datetime(2026, 7, 18, tzinfo=timezone.utc),
+    )
+    route = respx.get(item.url).mock(
+        return_value=Response(
+            200,
+            headers={"content-type": "text/html"},
+            text="<html><main><p>" + ("Public EIA article material. " * 20) + "</p></main></html>",
+        )
+    )
+
+    await PublicArticleReader().enrich([item])
+
+    assert route.called
+    assert len(item.article_text) >= 300
+    assert item.metadata["article_read_status"] == "read"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_public_article_reader_never_fetches_financial_times() -> None:
+    item = ContentItem(
+        source="Financial Times",
+        title="Oil market outlook",
+        url="https://www.ft.com/content/example",
+        published_at=datetime(2026, 7, 18, tzinfo=timezone.utc),
+    )
+
+    await PublicArticleReader().enrich([item])
+
+    assert item.article_text == ""
+
+
+def test_build_sources_includes_authoritative_default_and_extra_feeds(settings) -> None:
+    settings = replace(settings, extra_rss_feeds=(("Custom authority", "https://example.test/rss"),))
+
+    source_names = {source.name for source in build_sources(settings)}
+
+    assert {"U.S. EIA Today in Energy", "U.S. EIA Press Releases", "Federal Reserve Press Releases", "CFTC Press Releases"} <= source_names
+    assert "Custom authority" in source_names

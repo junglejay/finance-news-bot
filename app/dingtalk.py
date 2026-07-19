@@ -12,7 +12,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import httpx
 
 from .config import Settings
-from .models import DailyBrief
+from .models import DeepReadingReport
 
 
 class DingTalkDeliveryError(RuntimeError):
@@ -44,14 +44,14 @@ class DingTalkNotifier:
         self.webhook = settings.dingtalk_webhook
         self.secret = settings.dingtalk_secret
 
-    async def send_brief(self, brief: DailyBrief) -> DeliveryResult:
+    async def send_report(self, report: DeepReadingReport) -> DeliveryResult:
         return await self.send_markdown(
-            f"商品与风控情报晨报｜{brief.report_date.isoformat()}", brief.to_markdown()
+            f"商品与风控情报深度阅读（{report.report_date.isoformat()}）", report.to_markdown()
         )
 
     async def send_fault(self, message: str) -> DeliveryResult:
-        text = f"# 商品与风控情报晨报｜任务异常\n\n{message}\n\n请检查服务日志与数据源状态。"
-        return await self.send_markdown("商品与风控情报晨报｜任务异常", text)
+        text = f"# 商品与风控情报：任务异常\n\n{message}\n\n请检查任务日志与数据源状态。"
+        return await self.send_markdown("商品与风控情报：任务异常", text)
 
     async def send_markdown(self, title: str, markdown: str) -> DeliveryResult:
         if not self.webhook:

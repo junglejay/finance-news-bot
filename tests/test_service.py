@@ -5,7 +5,7 @@ from datetime import date, datetime, timezone
 import pytest
 
 from app.dingtalk import DeliveryResult
-from app.models import BriefItem, ContentItem, DailyBrief, ItemCategory, ResearchBrief
+from app.models import ArticleAnalysis, ContentItem, DeepReadingReport, ItemCategory
 from app.service import BriefService
 from app.sources import Source
 
@@ -25,44 +25,25 @@ class DuplicateSource(StaticSource):
 
 
 class FixtureGenerator:
-    async def generate(self, report_date: date, candidates: list[ContentItem]) -> DailyBrief:
+    async def generate(self, report_date: date, candidates: list[ContentItem]) -> DeepReadingReport:
         commodity = next(item for item in candidates if item.category == ItemCategory.COMMODITY)
-        risk = next(item for item in candidates if item.category == ItemCategory.RISK)
-        research = next(item for item in candidates if item.category == ItemCategory.RESEARCH)
-        return DailyBrief(
+        return DeepReadingReport(
             report_date=report_date,
-            key_judgements=["商品供需与公司治理风险均有新信息。", "仅依据已收集资料。"],
-            commodity_items=[
-                BriefItem(
+            analyses=[
+                ArticleAnalysis(
                     title=commodity.title,
                     source=commodity.source,
                     url=commodity.url,
                     published_at=commodity.published_at,
-                    what_happened="原油供应信息更新。",
-                    why_it_matters="可能改变供需预期。",
-                    market_impact="关注能源相关资产。",
+                    core_thesis="The fixture contains a commodity development worth examining.",
+                    fact_chain=["The fixture source supplied an oil-related update."],
+                    detailed_reading=(
+                        "The test generator turns the selected article into a detailed reading rather than a short card. "
+                        "It explains that further evidence would be needed before drawing a market conclusion."
+                    ),
+                    transmission_or_risk=["Monitor later primary data for confirmation."],
                 )
             ],
-            risk_items=[
-                BriefItem(
-                    title=risk.title,
-                    source=risk.source,
-                    url=risk.url,
-                    published_at=risk.published_at,
-                    what_happened="监管发布会计执法信息。",
-                    why_it_matters="提示财务报告风险。",
-                    market_impact="关注同业治理质量。",
-                )
-            ],
-            research_item=ResearchBrief(
-                title=research.title,
-                source=research.source,
-                url=research.url,
-                published_at=research.published_at,
-                research_question="研究油价与期货。",
-                key_finding="提醒邮件仅提供论文题目。",
-                practical_implication="阅读原文后验证。",
-            ),
         )
 
 
@@ -71,7 +52,7 @@ class FixtureNotifier:
         self.sent = 0
         self.faults = 0
 
-    async def send_brief(self, brief: DailyBrief) -> DeliveryResult:
+    async def send_report(self, report: DeepReadingReport) -> DeliveryResult:
         self.sent += 1
         return DeliveryResult(200, {"errcode": 0})
 
@@ -122,4 +103,5 @@ async def test_service_runs_full_pipeline_in_memory(settings) -> None:
     assert result.status == "success"
     assert result.collected_count == 3
     assert result.candidate_count == 3
+    assert result.readable_count == 0
     assert notifier.sent == 1

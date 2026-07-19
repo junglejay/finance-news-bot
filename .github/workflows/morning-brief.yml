@@ -30,6 +30,9 @@ jobs:
       FT_FEED_URL: ${{ secrets.FT_FEED_URL }}
       FT_EMAIL_SENDER: ${{ secrets.FT_EMAIL_SENDER }}
       SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+      # Configure non-sensitive, additional public RSS feeds as a repository variable.
+      EXTRA_RSS_FEEDS: ${{ vars.EXTRA_RSS_FEEDS }}
+      EXTRA_ARTICLE_DOMAINS: ${{ vars.EXTRA_ARTICLE_DOMAINS }}
 
     steps:
       - uses: actions/checkout@v4
@@ -43,5 +46,5 @@ jobs:
       - name: Install runtime dependencies
         run: python -m pip install --disable-pip-version-check -r requirements.txt
 
-      - name: Collect, analyse, and deliver the morning brief
+      - name: Collect, read, analyse, and deliver the report
         run: python -m app.cli run-once

@@ -98,7 +98,7 @@ def score_item(item: ContentItem, now: datetime | None = None) -> ContentItem:
         score += min(45, 12 * len(risk_anchor_hits))
         score += min(10, 2 * len(risk_context_hits))
         reasons.append("舞弊/内控：" + "、".join(risk_anchor_hits))
-        if item.source.startswith(("SEC", "PCAOB")):
+        if item.source.startswith(("SEC", "PCAOB", "CFTC")):
             score += 25
             reasons.append("第一方监管来源")
     elif commodity_anchor_hits:
@@ -123,7 +123,7 @@ def score_item(item: ContentItem, now: datetime | None = None) -> ContentItem:
 def select_candidates(items: list[ContentItem]) -> list[ContentItem]:
     """Return a compact, category-balanced input set for the model."""
     ranked = sorted(items, key=lambda item: (item.score, item.published_at), reverse=True)
-    commodity = [item for item in ranked if item.category == ItemCategory.COMMODITY][:8]
-    risk = [item for item in ranked if item.category == ItemCategory.RISK][:8]
-    research = [item for item in ranked if item.category == ItemCategory.RESEARCH][:4]
+    commodity = [item for item in ranked if item.category == ItemCategory.COMMODITY][:4]
+    risk = [item for item in ranked if item.category == ItemCategory.RISK][:4]
+    research = [item for item in ranked if item.category == ItemCategory.RESEARCH][:2]
     return commodity + risk + research

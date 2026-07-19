@@ -11,24 +11,41 @@ from datetime import datetime, timedelta, timezone
 from email.header import decode_header, make_header
 from email.utils import parsedate_to_datetime
 from typing import Iterable
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import feedparser
 import httpx
 from bs4 import BeautifulSoup
-from dateutil import parser as date_parser
+from dateutil import parser as date_parser, tz
 
 from .config import Settings
 from .models import ContentItem, ItemCategory
 
 
 FORBES_BUSINESS_RSS = "https://www.forbes.com/business/feed/"
+EIA_TODAY_IN_ENERGY_RSS = "https://www.eia.gov/rss/todayinenergy.xml"
+EIA_PRESS_RELEASES_RSS = "https://www.eia.gov/rss/press_rss.xml"
+FEDERAL_RESERVE_PRESS_RSS = "https://www.federalreserve.gov/feeds/press_all.xml"
+CFTC_PRESS_URL = "https://www.cftc.gov/PressRoom/PressReleases?TB_iframe=true&page=0"
 SEC_AAER_URL = (
     "https://www.sec.gov/enforcement-litigation/accounting-auditing-enforcement-releases"
     "?month=All&order=field_publish_date&sort=desc&year=All"
 )
 SEC_PRESS_URL = "https://www.sec.gov/newsroom/press-releases?month=All&year=All"
 PCAOB_NEWS_URL = "https://pcaobus.org/news-events/news-releases"
+
+# Full text is read only from public pages operated by these sources.  In
+# particular, FT and Scholar links are never fetched, even if a feed provides
+# their headline, so the workflow does not attempt to bypass subscriptions.
+PUBLIC_ARTICLE_DOMAINS = {
+    "forbes.com",
+    "eia.gov",
+    "sec.gov",
+    "pcaobus.org",
+    "cftc.gov",
+    "federalreserve.gov",
+}
+FULL_TEXT_BLOCKED_SOURCES = {"Financial Times", "Google Scholar Alert"}
 
 
 class SourceFetchError(RuntimeError):
@@ -47,7 +64,13 @@ def _to_utc(value: str | None, fallback: datetime) -> datetime:
     if not value:
         return fallback
     try:
-        parsed = date_parser.parse(value)
+        parsed = date_parser.parse(
+            value,
+            tzinfos={
+                "EST": tz.gettz("America/New_York"),
+                "EDT": tz.gettz("America/New_York"),
+            },
+        )
     except (TypeError, ValueError, OverflowError):
         return fallback
     if parsed.tzinfo is None:
@@ -98,6 +121,81 @@ class RSSSource(Source):
         return items
 
 
+class PublicArticleReader:
+    """Read public article bodies for the selected sources without persisting them.
+
+    The reader deliberately uses a small allow-list of first-party domains. It is
+    not a generic scraper and it does not attempt logins, cookie walls, archive
+    copies, or subscription workarounds.
+    """
+
+    def __init__(
+        self,
+        extra_allowed_domains: Iterable[str] = (),
+        max_characters: int = 12_000,
+        concurrency: int = 4,
+    ) -> None:
+        self.allowed_domains = PUBLIC_ARTICLE_DOMAINS | {domain.lower() for domain in extra_allowed_domains}
+        self.max_characters = max_characters
+        self.concurrency = concurrency
+
+    async def enrich(self, items: list[ContentItem]) -> list[ContentItem]:
+        semaphore = asyncio.Semaphore(self.concurrency)
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            await asyncio.gather(*(self._enrich_one(client, semaphore, item) for item in items))
+        return items
+
+    async def _enrich_one(
+        self, client: httpx.AsyncClient, semaphore: asyncio.Semaphore, item: ContentItem
+    ) -> None:
+        if not self._is_allowed(item):
+            return
+        try:
+            async with semaphore:
+                response = await client.get(
+                    item.url,
+                    headers={"User-Agent": "commodity-risk-intel-bot/1.0", "Accept": "text/html,application/xhtml+xml"},
+                )
+                response.raise_for_status()
+            content_type = response.headers.get("content-type", "").lower()
+            if "html" not in content_type:
+                item.metadata["article_read_status"] = "skipped_non_html"
+                return
+            article_text = _extract_public_article_text(response.text, self.max_characters)
+            if len(article_text) < 300:
+                item.metadata["article_read_status"] = "insufficient_public_text"
+                return
+            item.article_text = article_text
+            item.metadata["article_read_status"] = "read"
+        except httpx.HTTPError as exc:
+            item.metadata["article_read_status"] = f"unavailable:{type(exc).__name__}"
+
+    def _is_allowed(self, item: ContentItem) -> bool:
+        if item.source in FULL_TEXT_BLOCKED_SOURCES:
+            return False
+        split = urlsplit(item.url)
+        host = (split.hostname or "").lower()
+        return split.scheme == "https" and any(
+            host == domain or host.endswith(f".{domain}") for domain in self.allowed_domains
+        )
+
+
+def _extract_public_article_text(html: str, max_characters: int) -> str:
+    soup = BeautifulSoup(html, "html.parser")
+    for element in soup.select("script, style, noscript, nav, header, footer, aside, form, svg"):
+        element.decompose()
+    root = soup.find("article") or soup.find("main") or soup.select_one('[role="main"]') or soup.body
+    if root is None:
+        return ""
+    blocks: list[str] = []
+    for element in root.select("p, h2, h3, li"):
+        text = _clean_text(element.get_text(" "))
+        if len(text) < 30 or (blocks and text == blocks[-1]):
+            continue
+        blocks.append(text)
+    return "\n".join(blocks)[:max_characters]
+
+
 class SECListingSource(Source):
     def __init__(self, name: str, url: str, user_agent: str) -> None:
         self.name = name
@@ -110,12 +208,12 @@ class SECListingSource(Source):
                 response = await client.get(self.url, headers={"User-Agent": self.user_agent, "Accept-Encoding": "gzip, deflate"})
                 response.raise_for_status()
         except httpx.HTTPError as exc:
-            raise SourceFetchError(f"SEC fetch failed: {exc}") from exc
+            raise SourceFetchError(f"public listing fetch failed: {exc}") from exc
         return parse_sec_listing(response.text, self.url, self.name, since)
 
 
 def parse_sec_listing(html: str, page_url: str, source: str, since: datetime) -> list[ContentItem]:
-    """Extract public SEC listing rows without downloading a release or complaint."""
+    """Extract public dated listing rows without downloading a release or complaint."""
     soup = BeautifulSoup(html, "html.parser")
     now = datetime.now(timezone.utc)
     items: list[ContentItem] = []
@@ -420,10 +518,16 @@ def _unique_by_url(items: Iterable[ContentItem]) -> list[ContentItem]:
 def build_sources(settings: Settings) -> list[Source]:
     sources: list[Source] = [
         RSSSource("Forbes", FORBES_BUSINESS_RSS),
+        RSSSource("U.S. EIA Today in Energy", EIA_TODAY_IN_ENERGY_RSS),
+        RSSSource("U.S. EIA Press Releases", EIA_PRESS_RELEASES_RSS),
+        RSSSource("Federal Reserve Press Releases", FEDERAL_RESERVE_PRESS_RSS),
+        SECListingSource("CFTC Press Releases", CFTC_PRESS_URL, settings.sec_user_agent),
         SECListingSource("SEC Accounting & Auditing Enforcement", SEC_AAER_URL, settings.sec_user_agent),
         SECListingSource("SEC Press Releases", SEC_PRESS_URL, settings.sec_user_agent),
         PCAOBNewsSource(),
     ]
+    for name, feed_url in settings.extra_rss_feeds:
+        sources.append(RSSSource(name, feed_url))
     if settings.ft_enabled:
         if settings.ft_feed_url:
             sources.append(RSSSource("Financial Times", settings.ft_feed_url))

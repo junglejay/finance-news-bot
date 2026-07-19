@@ -10,9 +10,26 @@ from app.ai import BriefGenerationError, OpenAICompatibleBriefGenerator
 from app.models import ContentItem, ItemCategory
 
 
+def _analysis(url: str) -> dict[str, object]:
+    return {
+        "title": "Crude oil futures update",
+        "source": "Forbes",
+        "url": url,
+        "published_at": "2026-07-17T00:00:00+00:00",
+        "core_thesis": "The article describes a change in the oil supply backdrop.",
+        "fact_chain": ["The source describes an oil supply update."],
+        "detailed_reading": (
+            "The available article text links the supply update to current market conditions. "
+            "It does not establish a price outcome, so the implication remains a research observation rather than a forecast."
+        ),
+        "transmission_or_risk": ["Researchers can monitor whether later inventory data confirms the stated supply change."],
+        "limits_and_next_checks": ["Confirm the scale and timing in the linked source and subsequent official data."],
+    }
+
+
 @pytest.mark.asyncio
 @respx.mock
-async def test_openai_compatible_generator_validates_and_returns_structured_brief(settings) -> None:
+async def test_openai_compatible_generator_validates_and_returns_deep_reading(settings) -> None:
     published = datetime(2026, 7, 17, 0, 0, tzinfo=timezone.utc)
     candidate = ContentItem(
         source="Forbes",
@@ -20,6 +37,7 @@ async def test_openai_compatible_generator_validates_and_returns_structured_brie
         title="Crude oil futures update",
         url="https://example.test/oil",
         summary="Oil supply update",
+        article_text="The public article says an oil supply development may affect market conditions. " * 10,
         published_at=published,
         score=75,
     )
@@ -27,24 +45,13 @@ async def test_openai_compatible_generator_validates_and_returns_structured_brie
         "choices": [
             {
                 "message": {
-                    "content": """
-                    {
-                      "report_date": "2026-07-17",
-                      "key_judgements": ["原油供给信息值得持续跟踪。"],
-                      "commodity_items": [{
-                        "title": "Crude oil futures update",
-                        "source": "Forbes",
-                        "url": "https://example.test/oil",
-                        "published_at": "2026-07-17T00:00:00+00:00",
-                        "what_happened": "来源披露了原油供给更新。",
-                        "why_it_matters": "可能影响供需预期。",
-                        "market_impact": "关注能源相关资产。"
-                      }],
-                      "risk_items": [],
-                      "research_item": null,
-                      "disclaimer": "本简报仅供研究参考，不构成投资建议。"
-                    }
-                    """
+                    "content": str(
+                        {
+                            "report_date": "2026-07-17",
+                            "analyses": [_analysis(candidate.url)],
+                            "disclaimer": "For research only.",
+                        }
+                    ).replace("'", '"')
                 }
             }
         ]
@@ -53,11 +60,11 @@ async def test_openai_compatible_generator_validates_and_returns_structured_brie
         return_value=Response(200, json=response)
     )
 
-    brief = await OpenAICompatibleBriefGenerator(settings).generate(date(2026, 7, 17), [candidate])
+    report = await OpenAICompatibleBriefGenerator(settings).generate(date(2026, 7, 17), [candidate])
 
     assert route.called
-    assert brief.commodity_items[0].url == candidate.url
-    assert "原油" in brief.key_judgements[0]
+    assert report.analyses[0].url == candidate.url
+    assert "Deep" in report.to_markdown() or "深度" in report.to_markdown()
 
 
 @pytest.mark.asyncio
@@ -66,26 +73,32 @@ async def test_openai_compatible_generator_rejects_hallucinated_source_url(setti
     candidate = ContentItem(
         source="Forbes",
         category=ItemCategory.COMMODITY,
-        title="Gold futures update",
-        url="https://example.test/gold",
-        summary="Gold futures",
+        title="Crude oil futures update",
+        url="https://example.test/oil",
+        summary="Oil supply update",
+        article_text="Public article text with enough material for an analysis. " * 10,
         published_at=datetime(2026, 7, 17, tzinfo=timezone.utc),
     )
+    analysis = _analysis("https://example.test/not-a-source")
     response = {
         "choices": [
-            {
-                "message": {
-                    "content": """
-                    {"report_date":"2026-07-17","key_judgements":["x"],"commodity_items":[{
-                    "title":"Gold futures update","source":"Forbes","url":"https://example.test/not-a-source",
-                    "published_at":"2026-07-17T00:00:00+00:00","what_happened":"x","why_it_matters":"x","market_impact":"x"}],
-                    "risk_items":[],"research_item":null}
-                    """
-                }
-            }
+            {"message": {"content": __import__("json").dumps({"report_date": "2026-07-17", "analyses": [analysis]})}}
         ]
     }
     respx.post("https://api.deepseek.test/v1/chat/completions").mock(return_value=Response(200, json=response))
 
     with pytest.raises(BriefGenerationError, match="unknown URL"):
         await OpenAICompatibleBriefGenerator(settings, attempts=1).generate(date(2026, 7, 17), [candidate])
+
+
+@pytest.mark.asyncio
+async def test_generator_requires_publicly_readable_article(settings) -> None:
+    candidate = ContentItem(
+        source="Forbes",
+        title="No body",
+        url="https://example.test/no-body",
+        published_at=datetime(2026, 7, 17, tzinfo=timezone.utc),
+    )
+
+    with pytest.raises(BriefGenerationError, match="publicly readable"):
+        await OpenAICompatibleBriefGenerator(settings).generate(date(2026, 7, 17), [candidate])

@@ -23,4 +23,6 @@ def settings() -> Settings:
         scholar_imap_folder="INBOX",
         scholar_sender="scholaralerts-noreply@google.com",
         sec_user_agent="test-bot contact=test@example.com",
+        extra_rss_feeds=(),
+        extra_article_domains=(),
     )

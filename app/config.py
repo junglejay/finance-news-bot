@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 
 
@@ -14,6 +15,27 @@ def _value(name: str, default: str = "") -> str:
 def _integer(name: str, default: int) -> int:
     value = _value(name)
     return int(value) if value else default
+
+
+def _rss_feed_pairs() -> tuple[tuple[str, str], ...]:
+    """Parse one `Source name|https://feed.example/rss` pair per line."""
+    pairs: list[tuple[str, str]] = []
+    for line in os.getenv("EXTRA_RSS_FEEDS", "").splitlines():
+        name, separator, url = line.partition("|")
+        name, url = name.strip(), url.strip()
+        if separator and name and url.startswith("https://"):
+            pairs.append((name[:120], url))
+    return tuple(pairs)
+
+
+def _article_domains() -> tuple[str, ...]:
+    """Parse an explicit allow-list for full text from extra public feeds."""
+    domains: list[str] = []
+    for value in re.split(r"[\s,]+", os.getenv("EXTRA_ARTICLE_DOMAINS", "").strip()):
+        domain = value.lower().removeprefix("https://").removeprefix("http://").rstrip("/")
+        if re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", domain) and domain not in domains:
+            domains.append(domain)
+    return tuple(domains)
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +55,8 @@ class Settings:
     scholar_imap_folder: str
     scholar_sender: str
     sec_user_agent: str
+    extra_rss_feeds: tuple[tuple[str, str], ...]
+    extra_article_domains: tuple[str, ...]
 
     @property
     def scholar_enabled(self) -> bool:
@@ -66,4 +90,6 @@ class Settings:
             sec_user_agent=_value(
                 "SEC_USER_AGENT", "commodity-risk-intel-bot/1.0 contact=you@example.com"
             ),
+            extra_rss_feeds=_rss_feed_pairs(),
+            extra_article_domains=_article_domains(),
         )

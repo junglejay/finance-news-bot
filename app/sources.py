@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import email
 import imaplib
+import logging
 import re
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
@@ -20,6 +21,9 @@ from dateutil import parser as date_parser, tz
 
 from .config import Settings
 from .models import ContentItem, ItemCategory
+
+
+logger = logging.getLogger(__name__)
 
 
 FORBES_BUSINESS_RSS = "https://www.forbes.com/business/feed/"
@@ -149,6 +153,7 @@ class PublicArticleReader:
         self, client: httpx.AsyncClient, semaphore: asyncio.Semaphore, item: ContentItem
     ) -> None:
         if not self._is_allowed(item):
+            logger.debug(f"Skipping {item.source} '{item.title[:50]}' - source/domain not allowed")
             return
         try:
             async with semaphore:
@@ -160,15 +165,19 @@ class PublicArticleReader:
             content_type = response.headers.get("content-type", "").lower()
             if "html" not in content_type:
                 item.metadata["article_read_status"] = "skipped_non_html"
+                logger.debug(f"Skipping {item.source} - non-HTML content type: {content_type}")
                 return
             article_text = _extract_public_article_text(response.text, self.max_characters)
             if len(article_text) < 300:
-                item.metadata["article_read_status"] = "insufficient_public_text"
+                item.metadata["article_read_status"] = f"insufficient_text_{len(article_text)}_chars"
+                logger.debug(f"Skipping {item.source} '{item.title[:50]}' - insufficient text: {len(article_text)} chars")
                 return
             item.article_text = article_text
             item.metadata["article_read_status"] = "read"
+            logger.debug(f"Successfully read {len(article_text)} chars from {item.source}")
         except httpx.HTTPError as exc:
             item.metadata["article_read_status"] = f"unavailable:{type(exc).__name__}"
+            logger.debug(f"HTTP error reading {item.source} '{item.title[:50]}': {exc}")
 
     def _is_allowed(self, item: ContentItem) -> bool:
         if item.source in FULL_TEXT_BLOCKED_SOURCES:

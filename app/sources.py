@@ -30,6 +30,10 @@ FORBES_BUSINESS_RSS = "https://www.forbes.com/business/feed/"
 EIA_TODAY_IN_ENERGY_RSS = "https://www.eia.gov/rss/todayinenergy.xml"
 EIA_PRESS_RELEASES_RSS = "https://www.eia.gov/rss/press_rss.xml"
 FEDERAL_RESERVE_PRESS_RSS = "https://www.federalreserve.gov/feeds/press_all.xml"
+BIS_PRESS_RELEASES_RSS = "https://www.bis.org/doclist/all_pressrels.rss"
+BIS_STATISTICAL_RELEASES_RSS = "https://www.bis.org/doclist/all_statistics.rss"
+ECB_NEWS_RSS = "https://www.ecb.europa.eu/rss/press.html"
+ECB_STATISTICAL_RELEASES_RSS = "https://www.ecb.europa.eu/rss/statpress.html"
 CFTC_PRESS_URL = "https://www.cftc.gov/PressRoom/PressReleases?TB_iframe=true&page=0"
 SEC_AAER_URL = (
     "https://www.sec.gov/enforcement-litigation/accounting-auditing-enforcement-releases"
@@ -42,6 +46,8 @@ PCAOB_NEWS_URL = "https://pcaobus.org/news-events/news-releases"
 # particular, FT and Scholar links are never fetched, even if a feed provides
 # their headline, so the workflow does not attempt to bypass subscriptions.
 PUBLIC_ARTICLE_DOMAINS = {
+    "bis.org",
+    "ecb.europa.eu",
     "forbes.com",
     "eia.gov",
     "sec.gov",
@@ -530,6 +536,10 @@ def build_sources(settings: Settings) -> list[Source]:
         RSSSource("U.S. EIA Today in Energy", EIA_TODAY_IN_ENERGY_RSS),
         RSSSource("U.S. EIA Press Releases", EIA_PRESS_RELEASES_RSS),
         RSSSource("Federal Reserve Press Releases", FEDERAL_RESERVE_PRESS_RSS),
+        RSSSource("BIS Press Releases", BIS_PRESS_RELEASES_RSS),
+        RSSSource("BIS Statistical Releases", BIS_STATISTICAL_RELEASES_RSS),
+        RSSSource("ECB News", ECB_NEWS_RSS),
+        RSSSource("ECB Statistical Releases", ECB_STATISTICAL_RELEASES_RSS),
         SECListingSource("CFTC Press Releases", CFTC_PRESS_URL, settings.sec_user_agent),
         SECListingSource("SEC Accounting & Auditing Enforcement", SEC_AAER_URL, settings.sec_user_agent),
         SECListingSource("SEC Press Releases", SEC_PRESS_URL, settings.sec_user_agent),

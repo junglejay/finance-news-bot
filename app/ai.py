@@ -67,7 +67,10 @@ def _request_prompt(report_date: date, candidates: list[ContentItem]) -> str:
         "disclaimer": "本文仅供研究参考，不构成投资建议。",
     }
     instructions = {
-        "任务": "输出 1 至 4 篇值得阅读的深度文章解读，优先原油、黄金、商品/期货、财务舞弊和内部控制。",
+        "任务": (
+            "从商品、宏观驱动、财务风险和研究候选中，输出 1 至 4 篇最值得阅读的深度文章解读；"
+            "重点关注能源、金属、农产品、通胀、利率、央行政策、监管执法、财务舞弊和内部控制。"
+        ),
         "规则": [
             "每一篇 analyses 只能选择 full_text_available=true 的输入条目；没有可读取正文的条目不能进入输出。",
             "每一篇的 title、source、url、published_at 必须与一个输入条目完全一致。",

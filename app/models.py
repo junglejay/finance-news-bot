@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, field_validator
 
 class ItemCategory(StrEnum):
     COMMODITY = "commodity"
+    MACRO = "macro"
     RISK = "risk"
     RESEARCH = "research"
     OTHER = "other"

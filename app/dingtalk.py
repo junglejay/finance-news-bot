@@ -1,4 +1,8 @@
-"""DingTalk custom robot delivery with optional HMAC signing."""
+"""DingTalk custom robot delivery with optional HMAC signing.
+
+This module additionally ensures that messages sent to a DingTalk robot
+configured with keyword-based security include the required keyword.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +17,9 @@ import httpx
 
 from .config import Settings
 from .models import DeepReadingReport
+
+
+DEFAULT_KEYWORD = "新闻"
 
 
 class DingTalkDeliveryError(RuntimeError):
@@ -39,22 +46,36 @@ class DeliveryResult:
     response: dict
 
 
+def ensure_keyword_in_message(content: str, keyword: str = DEFAULT_KEYWORD) -> str:
+    """Ensure the DingTalk keyword is present in the message text/body.
+
+    If the keyword is missing, prepend it followed by a space for visibility.
+    """
+    if keyword in content:
+        return content
+    return f"{keyword} {content}"
+
+
 class DingTalkNotifier:
     def __init__(self, settings: Settings) -> None:
         self.webhook = settings.dingtalk_webhook
         self.secret = settings.dingtalk_secret
 
     async def send_report(self, report: DeepReadingReport) -> DeliveryResult:
-        return await self.send_markdown(
-            f"商品与风控情报深度阅读（{report.report_date.isoformat()}）", report.to_markdown()
-        )
+        title = f"商品与风控情报深度阅读（{report.report_date.isoformat()}）"
+        markdown = report.to_markdown()
+        return await self.send_markdown(title, markdown)
 
     async def send_fault(self, message: str) -> DeliveryResult:
         text = f"# 商品与风控情报：任务异常\n\n{message}\n\n请检查任务日志与数据源状态。"
         return await self.send_markdown("商品与风控情报：任务异常", text)
 
     async def send_markdown(self, title: str, markdown: str) -> DeliveryResult:
+        # Ensure the required keyword is present so keyword-based robots accept the message
+        markdown = ensure_keyword_in_message(markdown, DEFAULT_KEYWORD)
+
         if not self.webhook:
+            # Print to stdout for local/dev fallback; ensure keyword is present there too
             print(markdown)
             return DeliveryResult(status_code=0, response={"mode": "stdout", "title": title})
         payload = {
@@ -68,7 +89,7 @@ class DingTalkNotifier:
                 response = await client.post(url, json=payload)
                 response.raise_for_status()
         except httpx.HTTPError as exc:
-            status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+            status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None else None
             raise DingTalkDeliveryError(f"DingTalk webhook request failed: {exc}", status_code) from exc
         try:
             body = response.json()

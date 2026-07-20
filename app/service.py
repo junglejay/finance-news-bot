@@ -84,11 +84,30 @@ class BriefService:
                 result.source_failures.append(f"{source.name}: {exc}")
 
         result.collected_count = len(collected)
+        logger.info("Collected %d unique articles", result.collected_count)
+
         candidates = select_candidates(list(collected.values()))
         result.candidate_count = len(candidates)
+        logger.info("Selected %d candidates for reading after scoring", result.candidate_count)
+
         try:
             candidates = await self.article_reader.enrich(candidates)
             result.readable_count = sum(bool(item.article_text) for item in candidates)
+            logger.info("Successfully read full text from %d candidates", result.readable_count)
+
+            # Log detailed stats about failed reads
+            failed_reads = [item for item in candidates if not item.article_text]
+            if failed_reads:
+                logger.warning("Failed to read full text from %d candidates:", len(failed_reads))
+                for item in failed_reads:
+                    status = item.metadata.get("article_read_status", "unknown_status")
+                    logger.warning(
+                        "  - %s '%s': %s (url: %s)",
+                        item.source,
+                        item.title[:60],
+                        status,
+                        item.url,
+                    )
         except Exception as exc:
             logger.warning("public article reading failed: %s", exc)
             result.source_failures.append(f"Public article reader: {exc}")

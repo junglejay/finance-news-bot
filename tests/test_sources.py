@@ -134,5 +134,35 @@ def test_build_sources_includes_authoritative_default_and_extra_feeds(settings) 
 
     source_names = {source.name for source in build_sources(settings)}
 
-    assert {"U.S. EIA Today in Energy", "U.S. EIA Press Releases", "Federal Reserve Press Releases", "CFTC Press Releases"} <= source_names
+    assert {
+        "U.S. EIA Today in Energy",
+        "U.S. EIA Press Releases",
+        "Federal Reserve Press Releases",
+        "BIS Press Releases",
+        "BIS Statistical Releases",
+        "ECB News",
+        "ECB Statistical Releases",
+        "CFTC Press Releases",
+    } <= source_names
     assert "Custom authority" in source_names
+
+
+def test_bis_and_ecb_public_articles_are_allowed_by_default() -> None:
+    reader = PublicArticleReader()
+    published_at = datetime(2026, 7, 18, tzinfo=timezone.utc)
+
+    bis_item = ContentItem(
+        source="BIS Press Releases",
+        title="BIS release",
+        url="https://www.bis.org/press/example.htm",
+        published_at=published_at,
+    )
+    ecb_item = ContentItem(
+        source="ECB News",
+        title="ECB release",
+        url="https://www.ecb.europa.eu/press/example/html/index.en.html",
+        published_at=published_at,
+    )
+
+    assert reader._is_allowed(bis_item)
+    assert reader._is_allowed(ecb_item)

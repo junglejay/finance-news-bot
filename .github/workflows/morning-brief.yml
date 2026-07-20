@@ -2,8 +2,8 @@ name: Commodity & Risk Morning Brief
 
 on:
   schedule:
-    # 07:30 Asia/Shanghai, Monday through Friday. GitHub Actions cron uses UTC.
-    - cron: "30 23 * * 0-4"
+    # 07:30 Asia/Shanghai, every day. GitHub Actions cron uses UTC.
+    - cron: "30 23 * * *"
   workflow_dispatch:
 
 permissions:

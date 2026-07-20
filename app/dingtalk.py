@@ -49,11 +49,11 @@ class DeliveryResult:
 def ensure_keyword_in_message(content: str, keyword: str = DEFAULT_KEYWORD) -> str:
     """Ensure the DingTalk keyword is present in the message text/body.
 
-    If the keyword is missing, prepend it followed by a space for visibility.
+    If the keyword is missing, prepend it on its own line before the content.
     """
     if keyword in content:
         return content
-    return f"{keyword} {content}"
+    return f"{keyword}\n\n{content}"
 
 
 class DingTalkNotifier:
@@ -72,6 +72,7 @@ class DingTalkNotifier:
 
     async def send_markdown(self, title: str, markdown: str) -> DeliveryResult:
         # Ensure the required keyword is present so keyword-based robots accept the message
+        # Place it at the very beginning, before any Markdown formatting
         markdown = ensure_keyword_in_message(markdown, DEFAULT_KEYWORD)
 
         if not self.webhook:

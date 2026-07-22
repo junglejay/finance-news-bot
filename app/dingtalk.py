@@ -62,13 +62,13 @@ class DingTalkNotifier:
         self.secret = settings.dingtalk_secret
 
     async def send_report(self, report: DeepReadingReport) -> DeliveryResult:
-        title = f"商品与风控情报深度阅读（{report.report_date.isoformat()}）"
+        title = f"全球资本市场风控与监管（{report.report_date.isoformat()}）"
         markdown = report.to_markdown()
         return await self.send_markdown(title, markdown)
 
     async def send_fault(self, message: str) -> DeliveryResult:
-        text = f"# 商品与风控情报新闻：任务异常\n\n{message}\n\n请检查任务日志与数据源状态。"
-        return await self.send_markdown("商品与风控情报新闻：任务异常", text)
+        text = f"# 全球资本市场风控与监管：任务异常\n\n{message}\n\n请检查任务日志与数据源状态。"
+        return await self.send_markdown("全球资本市场风控与监管：任务异常", text)
 
     async def send_markdown(self, title: str, markdown: str) -> DeliveryResult:
         # Ensure the required keyword is present so keyword-based robots accept the message

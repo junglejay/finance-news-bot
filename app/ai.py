@@ -36,6 +36,13 @@ MIN_AI_OUTPUT_ARTICLES = 3
 MAX_AI_OUTPUT_ARTICLES = 4
 
 
+def _output_count_bounds(available_articles: int) -> tuple[int, int]:
+    """Return every available article when there are four or fewer."""
+    if available_articles <= MAX_AI_OUTPUT_ARTICLES:
+        return available_articles, available_articles
+    return MIN_AI_OUTPUT_ARTICLES, MAX_AI_OUTPUT_ARTICLES
+
+
 def _candidate_payload(candidates: list[ContentItem]) -> list[dict[str, object]]:
     return [
         {
@@ -54,7 +61,12 @@ def _candidate_payload(candidates: list[ContentItem]) -> list[dict[str, object]]
     ]
 
 
-def _request_prompt(report_date: date, candidates: list[ContentItem]) -> str:
+def _request_prompt(
+    report_date: date,
+    candidates: list[ContentItem],
+    min_analyses: int,
+    max_analyses: int,
+) -> str:
     schema = {
         "report_date": report_date.isoformat(),
         "analyses": [
@@ -74,8 +86,8 @@ def _request_prompt(report_date: date, candidates: list[ContentItem]) -> str:
     }
     instructions = {
         "output_count": (
-            "Return at least 3 and at most 4 distinct analyses. "
-            "Do not return fewer than 3 analyses when the supplied source articles are available."
+            f"Return between {min_analyses} and {max_analyses} distinct analyses. "
+            "When both values are the same, return exactly that number of analyses."
         ),
         "任务": (
             "从资本市场、公司治理、注册会计师、财务风险候选中，输出 1 至 4 篇最值得阅读的深度文章解读；"
@@ -143,10 +155,7 @@ class OpenAICompatibleDeepReadingGenerator:
         )[:MAX_AI_INPUT_CANDIDATES]
         if not readable_candidates:
             raise ReportGenerationError("no publicly readable full articles were collected")
-        if len(readable_candidates) < MIN_AI_OUTPUT_ARTICLES:
-            raise ReportGenerationError(
-                f"at least {MIN_AI_OUTPUT_ARTICLES} publicly readable articles are required"
-            )
+        min_analyses, max_analyses = _output_count_bounds(len(readable_candidates))
 
         payload = {
             "model": self.settings.ai_model,
@@ -154,7 +163,10 @@ class OpenAICompatibleDeepReadingGenerator:
             "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": _request_prompt(report_date, readable_candidates)},
+                {
+                    "role": "user",
+                    "content": _request_prompt(report_date, readable_candidates, min_analyses, max_analyses),
+                },
             ],
         }
         last_error: Exception | None = None
@@ -173,9 +185,9 @@ class OpenAICompatibleDeepReadingGenerator:
                 report = DeepReadingReport.model_validate(_extract_json(content))
                 if report.report_date != report_date:
                     raise ReportGenerationError("AI gateway returned the wrong report date")
-                if not MIN_AI_OUTPUT_ARTICLES <= len(report.analyses) <= MAX_AI_OUTPUT_ARTICLES:
+                if not min_analyses <= len(report.analyses) <= max_analyses:
                     raise ReportGenerationError(
-                        f"AI gateway must return between {MIN_AI_OUTPUT_ARTICLES} and {MAX_AI_OUTPUT_ARTICLES} analyses"
+                        f"AI gateway must return between {min_analyses} and {max_analyses} analyses"
                     )
                 _validate_source_references(report, readable_candidates)
                 return report

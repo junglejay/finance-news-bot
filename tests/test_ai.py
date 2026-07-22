@@ -130,7 +130,7 @@ async def test_generator_requires_publicly_readable_article(settings) -> None:
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_generator_rejects_fewer_than_three_analyses(settings) -> None:
+async def test_generator_rejects_fewer_analyses_than_available_candidates(settings) -> None:
     candidate = ContentItem(
         source="Forbes",
         category=ItemCategory.COMMODITY,
@@ -158,8 +158,42 @@ async def test_generator_rejects_fewer_than_three_analyses(settings) -> None:
     }
     respx.post("https://api.deepseek.test/v1/chat/completions").mock(return_value=Response(200, json=response))
 
-    with pytest.raises(BriefGenerationError, match="between 3 and 4"):
+    with pytest.raises(BriefGenerationError, match="between 3 and 3"):
         await OpenAICompatibleBriefGenerator(settings, attempts=1).generate(date(2026, 7, 17), candidates)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_generator_returns_all_articles_when_fewer_than_four_are_readable(settings) -> None:
+    candidate = ContentItem(
+        source="Forbes",
+        category=ItemCategory.COMMODITY,
+        title="Crude oil futures update",
+        url="https://example.test/oil",
+        summary="Oil supply update",
+        article_text="Public article text with enough material for an analysis. " * 10,
+        published_at=datetime(2026, 7, 17, tzinfo=timezone.utc),
+    )
+    candidates = [candidate, candidate.model_copy(update={"url": "https://example.test/oil-2"})]
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "content": __import__("json").dumps(
+                        {
+                            "report_date": "2026-07-17",
+                            "analyses": [_analysis(item.url) for item in candidates],
+                        }
+                    )
+                }
+            }
+        ]
+    }
+    respx.post("https://api.deepseek.test/v1/chat/completions").mock(return_value=Response(200, json=response))
+
+    report = await OpenAICompatibleBriefGenerator(settings).generate(date(2026, 7, 17), candidates)
+
+    assert len(report.analyses) == 2
 
 
 def test_candidate_payload_limits_article_text_length() -> None:

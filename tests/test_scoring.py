@@ -65,6 +65,23 @@ def test_extended_commodity_vocabulary_covers_metals_and_agriculture() -> None:
     assert "商品/期货：futures、lithium、wheat" in item.score_reasons
 
 
+def test_expanded_priority_topics_receive_dedicated_categories() -> None:
+    now = datetime(2026, 7, 19, 1, tzinfo=timezone.utc)
+    capital_markets = score_item(
+        _item("IPO and stock market listing", "The capital markets transaction is underway."), now=now
+    )
+    governance_audit = score_item(
+        _item("Auditor investigates internal control failure", "A financial fraud risk was disclosed."), now=now
+    )
+    policy_ai = score_item(
+        _item("AI regulation proposed", "The legal policy framework targets AI governance."), now=now
+    )
+
+    assert capital_markets.category == ItemCategory.CAPITAL_MARKETS
+    assert governance_audit.category == ItemCategory.GOVERNANCE_AUDIT
+    assert policy_ai.category == ItemCategory.POLICY_AI
+
+
 def test_macro_market_driver_category() -> None:
     item = score_item(
         _item(

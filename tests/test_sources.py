@@ -10,7 +10,9 @@ from httpx import Response
 
 from app.models import ContentItem
 from app.sources import (
+    BOJ_WHATS_NEW_RSS,
     PublicArticleReader,
+    RSSSource,
     build_sources,
     parse_newsletter_message,
     parse_pcaob_listing,
@@ -138,11 +140,15 @@ def test_build_sources_includes_authoritative_default_and_extra_feeds(settings) 
         "U.S. EIA Today in Energy",
         "U.S. EIA Press Releases",
         "Federal Reserve Press Releases",
+        "Bank of Japan",
+        "Bank of Korea Press Releases",
         "BIS Press Releases",
         "BIS Statistical Releases",
         "ECB News",
         "ECB Statistical Releases",
         "CFTC Press Releases",
+        "European Commission Press Corner",
+        "European Banking Authority",
     } <= source_names
     assert "Custom authority" in source_names
 
@@ -166,3 +172,26 @@ def test_bis_and_ecb_public_articles_are_allowed_by_default() -> None:
 
     assert reader._is_allowed(bis_item)
     assert reader._is_allowed(ecb_item)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_bank_of_japan_rss_items_upgrade_to_https() -> None:
+    source = RSSSource("Bank of Japan", BOJ_WHATS_NEW_RSS)
+    route = respx.get(BOJ_WHATS_NEW_RSS).mock(
+        return_value=Response(
+            200,
+            headers={"content-type": "application/rss+xml"},
+            text=(
+                "<rss><channel><item><title>Policy update</title>"
+                "<link>http://www.boj.or.jp/en/mopo/example.htm</link>"
+                "<pubDate>Fri, 18 Jul 2026 08:00:00 +0000</pubDate>"
+                "</item></channel></rss>"
+            ),
+        )
+    )
+
+    items = await source.fetch(datetime(2026, 7, 17, tzinfo=timezone.utc))
+
+    assert route.called
+    assert items[0].url == "https://www.boj.or.jp/en/mopo/example.htm"

@@ -30,10 +30,14 @@ FORBES_BUSINESS_RSS = "https://www.forbes.com/business/feed/"
 EIA_TODAY_IN_ENERGY_RSS = "https://www.eia.gov/rss/todayinenergy.xml"
 EIA_PRESS_RELEASES_RSS = "https://www.eia.gov/rss/press_rss.xml"
 FEDERAL_RESERVE_PRESS_RSS = "https://www.federalreserve.gov/feeds/press_all.xml"
+BOJ_WHATS_NEW_RSS = "https://www.boj.or.jp/en/rss/whatsnew.xml"
+BOK_PRESS_RELEASES_RSS = "https://www.bok.or.kr/eng/bbs/E0000634/news.rss?menuNo=400069"
 BIS_PRESS_RELEASES_RSS = "https://www.bis.org/doclist/all_pressrels.rss"
 BIS_STATISTICAL_RELEASES_RSS = "https://www.bis.org/doclist/all_statistics.rss"
 ECB_NEWS_RSS = "https://www.ecb.europa.eu/rss/press.html"
 ECB_STATISTICAL_RELEASES_RSS = "https://www.ecb.europa.eu/rss/statpress.html"
+EUROPEAN_COMMISSION_PRESS_RSS = "https://ec.europa.eu/commission/presscorner/api/rss?language=en"
+EBA_NEWS_RSS = "https://www.eba.europa.eu/news-press/news/rss.xml"
 CFTC_PRESS_URL = "https://www.cftc.gov/PressRoom/PressReleases?TB_iframe=true&page=0"
 SEC_AAER_URL = (
     "https://www.sec.gov/enforcement-litigation/accounting-auditing-enforcement-releases"
@@ -48,14 +52,19 @@ PCAOB_NEWS_URL = "https://pcaobus.org/news-events/news-releases"
 PUBLIC_ARTICLE_DOMAINS = {
     "bis.org",
     "ecb.europa.eu",
+    "ec.europa.eu",
+    "eba.europa.eu",
     "forbes.com",
     "eia.gov",
+    "boj.or.jp",
+    "bok.or.kr",
     "sec.gov",
     "pcaobus.org",
     "cftc.gov",
     "federalreserve.gov",
 }
 FULL_TEXT_BLOCKED_SOURCES = {"Financial Times", "Google Scholar Alert"}
+HTTPS_UPGRADE_HOSTS = {"www.boj.or.jp"}
 
 
 class SourceFetchError(RuntimeError):
@@ -92,6 +101,14 @@ def _clean_text(value: str) -> str:
     return " ".join(BeautifulSoup(value or "", "html.parser").get_text(" ").split())
 
 
+def _upgrade_known_https_url(value: str) -> str:
+    """Use HTTPS for official feeds whose legacy items still contain HTTP links."""
+    split = urlsplit(value)
+    if split.scheme == "http" and (split.hostname or "").lower() in HTTPS_UPGRADE_HOSTS:
+        return split._replace(scheme="https").geturl()
+    return value
+
+
 class RSSSource(Source):
     def __init__(self, name: str, feed_url: str, category: ItemCategory = ItemCategory.OTHER) -> None:
         self.name = name
@@ -111,7 +128,7 @@ class RSSSource(Source):
         items: list[ContentItem] = []
         for entry in parsed.entries:
             title = _clean_text(entry.get("title", ""))
-            url = entry.get("link", "").strip()
+            url = _upgrade_known_https_url(entry.get("link", "").strip())
             if not title or not url:
                 continue
             published = _to_utc(entry.get("published") or entry.get("updated"), now)
@@ -536,10 +553,14 @@ def build_sources(settings: Settings) -> list[Source]:
         RSSSource("U.S. EIA Today in Energy", EIA_TODAY_IN_ENERGY_RSS),
         RSSSource("U.S. EIA Press Releases", EIA_PRESS_RELEASES_RSS),
         RSSSource("Federal Reserve Press Releases", FEDERAL_RESERVE_PRESS_RSS),
+        RSSSource("Bank of Japan", BOJ_WHATS_NEW_RSS),
+        RSSSource("Bank of Korea Press Releases", BOK_PRESS_RELEASES_RSS),
         RSSSource("BIS Press Releases", BIS_PRESS_RELEASES_RSS),
         RSSSource("BIS Statistical Releases", BIS_STATISTICAL_RELEASES_RSS),
         RSSSource("ECB News", ECB_NEWS_RSS),
         RSSSource("ECB Statistical Releases", ECB_STATISTICAL_RELEASES_RSS),
+        RSSSource("European Commission Press Corner", EUROPEAN_COMMISSION_PRESS_RSS),
+        RSSSource("European Banking Authority", EBA_NEWS_RSS),
         SECListingSource("CFTC Press Releases", CFTC_PRESS_URL, settings.sec_user_agent),
         SECListingSource("SEC Accounting & Auditing Enforcement", SEC_AAER_URL, settings.sec_user_agent),
         SECListingSource("SEC Press Releases", SEC_PRESS_URL, settings.sec_user_agent),

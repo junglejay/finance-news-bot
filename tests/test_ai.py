@@ -6,7 +6,12 @@ import pytest
 import respx
 from httpx import Response
 
-from app.ai import BriefGenerationError, OpenAICompatibleBriefGenerator
+from app.ai import (
+    MAX_AI_ARTICLE_CHARS,
+    BriefGenerationError,
+    OpenAICompatibleBriefGenerator,
+    _candidate_payload,
+)
 from app.models import ContentItem, ItemCategory
 
 
@@ -41,6 +46,11 @@ async def test_openai_compatible_generator_validates_and_returns_deep_reading(se
         published_at=published,
         score=75,
     )
+    candidates = [
+        candidate,
+        candidate.model_copy(update={"url": "https://example.test/oil-2"}),
+        candidate.model_copy(update={"url": "https://example.test/oil-3"}),
+    ]
     response = {
         "choices": [
             {
@@ -48,7 +58,7 @@ async def test_openai_compatible_generator_validates_and_returns_deep_reading(se
                     "content": str(
                         {
                             "report_date": "2026-07-17",
-                            "analyses": [_analysis(candidate.url)],
+                            "analyses": [_analysis(item.url) for item in candidates],
                             "disclaimer": "For research only.",
                         }
                     ).replace("'", '"')
@@ -60,7 +70,7 @@ async def test_openai_compatible_generator_validates_and_returns_deep_reading(se
         return_value=Response(200, json=response)
     )
 
-    report = await OpenAICompatibleBriefGenerator(settings).generate(date(2026, 7, 17), [candidate])
+    report = await OpenAICompatibleBriefGenerator(settings).generate(date(2026, 7, 17), candidates)
 
     assert route.called
     assert report.analyses[0].url == candidate.url
@@ -79,16 +89,30 @@ async def test_openai_compatible_generator_rejects_hallucinated_source_url(setti
         article_text="Public article text with enough material for an analysis. " * 10,
         published_at=datetime(2026, 7, 17, tzinfo=timezone.utc),
     )
+    candidates = [
+        candidate,
+        candidate.model_copy(update={"url": "https://example.test/oil-2"}),
+        candidate.model_copy(update={"url": "https://example.test/oil-3"}),
+    ]
     analysis = _analysis("https://example.test/not-a-source")
     response = {
         "choices": [
-            {"message": {"content": __import__("json").dumps({"report_date": "2026-07-17", "analyses": [analysis]})}}
+            {
+                "message": {
+                    "content": __import__("json").dumps(
+                        {
+                            "report_date": "2026-07-17",
+                            "analyses": [_analysis(candidates[0].url), _analysis(candidates[1].url), analysis],
+                        }
+                    )
+                }
+            }
         ]
     }
     respx.post("https://api.deepseek.test/v1/chat/completions").mock(return_value=Response(200, json=response))
 
     with pytest.raises(BriefGenerationError, match="unknown URL"):
-        await OpenAICompatibleBriefGenerator(settings, attempts=1).generate(date(2026, 7, 17), [candidate])
+        await OpenAICompatibleBriefGenerator(settings, attempts=1).generate(date(2026, 7, 17), candidates)
 
 
 @pytest.mark.asyncio
@@ -102,3 +126,92 @@ async def test_generator_requires_publicly_readable_article(settings) -> None:
 
     with pytest.raises(BriefGenerationError, match="publicly readable"):
         await OpenAICompatibleBriefGenerator(settings).generate(date(2026, 7, 17), [candidate])
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_generator_rejects_fewer_than_three_analyses(settings) -> None:
+    candidate = ContentItem(
+        source="Forbes",
+        category=ItemCategory.COMMODITY,
+        title="Crude oil futures update",
+        url="https://example.test/oil",
+        summary="Oil supply update",
+        article_text="Public article text with enough material for an analysis. " * 10,
+        published_at=datetime(2026, 7, 17, tzinfo=timezone.utc),
+    )
+    candidates = [
+        candidate,
+        candidate.model_copy(update={"url": "https://example.test/oil-2"}),
+        candidate.model_copy(update={"url": "https://example.test/oil-3"}),
+    ]
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "content": __import__("json").dumps(
+                        {"report_date": "2026-07-17", "analyses": [_analysis(candidate.url)]}
+                    )
+                }
+            }
+        ]
+    }
+    respx.post("https://api.deepseek.test/v1/chat/completions").mock(return_value=Response(200, json=response))
+
+    with pytest.raises(BriefGenerationError, match="between 3 and 4"):
+        await OpenAICompatibleBriefGenerator(settings, attempts=1).generate(date(2026, 7, 17), candidates)
+
+
+def test_candidate_payload_limits_article_text_length() -> None:
+    candidate = ContentItem(
+        source="Forbes",
+        title="Long article",
+        url="https://example.test/long",
+        article_text="x" * (MAX_AI_ARTICLE_CHARS + 1),
+        published_at=datetime(2026, 7, 17, tzinfo=timezone.utc),
+    )
+
+    payload = _candidate_payload([candidate])
+
+    assert len(payload[0]["article_text"]) == MAX_AI_ARTICLE_CHARS
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_generator_sends_only_top_six_readable_candidates(settings) -> None:
+    published = datetime(2026, 7, 17, tzinfo=timezone.utc)
+    candidates = [
+        ContentItem(
+            source="Forbes",
+            category=ItemCategory.COMMODITY,
+            title=f"Crude oil futures update {score}",
+            url=f"https://example.test/oil-{score}",
+            article_text=(f"Public article {score}. " * 400),
+            published_at=published,
+            score=score,
+        )
+        for score in range(1, 8)
+    ]
+    highest = candidates[-1]
+    analyses = []
+    for candidate in candidates[-3:]:
+        analysis = _analysis(candidate.url)
+        analysis["title"] = candidate.title
+        analyses.append(analysis)
+    response = {
+        "choices": [
+            {"message": {"content": __import__("json").dumps({"report_date": "2026-07-17", "analyses": analyses})}}
+        ]
+    }
+    route = respx.post("https://api.deepseek.test/v1/chat/completions").mock(
+        return_value=Response(200, json=response)
+    )
+
+    report = await OpenAICompatibleBriefGenerator(settings).generate(date(2026, 7, 17), candidates)
+
+    request_body = route.calls[0].request.content.decode()
+    assert len(report.analyses) == 3
+    assert highest.url in {analysis.url for analysis in report.analyses}
+    assert "https://example.test/oil-1" not in request_body
+    for score in range(2, 8):
+        assert f"https://example.test/oil-{score}" in request_body

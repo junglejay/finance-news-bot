@@ -61,10 +61,13 @@ class DingTalkNotifier:
         self.webhook = settings.dingtalk_webhook
         self.secret = settings.dingtalk_secret
 
-    async def send_report(self, report: DeepReadingReport) -> DeliveryResult:
-        title = f"全球资本市场风控与监管（{report.report_date.isoformat()}）"
-        markdown = report.to_markdown()
-        return await self.send_markdown(title, markdown)
+    async def send_report(self, report: DeepReadingReport) -> list[DeliveryResult]:
+        total = len(report.analyses)
+        results: list[DeliveryResult] = []
+        for index, analysis in enumerate(report.analyses, start=1):
+            title = f"全球资本市场风控与监管（{report.report_date.isoformat()}）{index}/{total}"
+            results.append(await self.send_markdown(title, report.article_to_markdown(analysis)))
+        return results
 
     async def send_fault(self, message: str) -> DeliveryResult:
         text = f"# 全球资本市场风控与监管：任务异常\n\n{message}\n\n请检查任务日志与数据源状态。"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from datetime import date, datetime, timezone
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -9,6 +10,7 @@ import respx
 from httpx import Response
 
 from app.dingtalk import DingTalkDeliveryError, DingTalkNotifier, signed_webhook_url
+from app.models import ArticleAnalysis, DeepReadingReport
 
 
 def test_signed_webhook_url_adds_timestamp_and_signature() -> None:
@@ -59,6 +61,39 @@ async def test_dingtalk_webhook_can_be_used_without_a_signing_secret(settings) -
     await DingTalkNotifier(local_settings).send_markdown("test", "# test")
 
     assert route.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_dingtalk_notifier_sends_one_message_per_analysis(settings) -> None:
+    route = respx.post(url__regex=r"https://oapi\.dingtalk\.test/robot/send.*").mock(
+        return_value=Response(200, json={"errcode": 0, "errmsg": "ok"})
+    )
+    report = DeepReadingReport(
+        report_date=date(2026, 7, 17),
+        analyses=[
+            ArticleAnalysis(
+                title=f"Analysis {index}",
+                source="Fixture source",
+                url=f"https://example.test/{index}",
+                published_at=datetime(2026, 7, 17, tzinfo=timezone.utc),
+                core_thesis="A traceable fixture thesis.",
+                fact_chain=["A source fact."],
+                detailed_reading="This fixture explanation is intentionally long enough to satisfy the report schema requirements.",
+                transmission_or_risk=["Monitor a later source release."],
+            )
+            for index in range(1, 4)
+        ],
+    )
+
+    results = await DingTalkNotifier(settings).send_report(report)
+
+    assert len(results) == 3
+    assert len(route.calls) == 3
+    payloads = [json.loads(call.request.content) for call in route.calls]
+    assert [payload["markdown"]["title"].endswith(f"{index}/3") for index, payload in enumerate(payloads, start=1)] == [True, True, True]
+    for index, payload in enumerate(payloads, start=1):
+        assert f"https://example.test/{index}" in payload["markdown"]["text"]
 
 
 @pytest.mark.asyncio

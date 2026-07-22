@@ -104,5 +104,9 @@ class DeepReadingReport(BaseModel):
         lines.extend(["---", self.disclaimer])
         return "\n".join(lines)
 
+    def article_to_markdown(self, analysis: ArticleAnalysis) -> str:
+        """Render a single analysis as its own delivery message."""
+        return self.model_copy(update={"analyses": [analysis]}).to_markdown()
+
     def to_json(self) -> str:
         return json.dumps(self.model_dump(mode="json"), ensure_ascii=False)

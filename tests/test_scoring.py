@@ -71,7 +71,7 @@ def test_expanded_priority_topics_receive_dedicated_categories() -> None:
         _item("IPO and stock market listing", "The capital markets transaction is underway."), now=now
     )
     governance_audit = score_item(
-        _item("Auditor investigates internal control failure", "A financial fraud risk was disclosed."), now=now
+        _item("Auditor independence reviewed by audit committee", "Internal control over financial reporting was assessed."), now=now
     )
     policy_ai = score_item(
         _item("AI regulation proposed", "The legal policy framework targets AI governance."), now=now
@@ -108,7 +108,7 @@ def test_expanded_risk_vocabulary() -> None:
     )
 
     assert item.category == ItemCategory.RISK
-    assert any(reason.startswith("舞弊/内控：") for reason in item.score_reasons)
+    assert any(reason.startswith("财务造假与监管执法：") for reason in item.score_reasons)
 
 
 def test_regulatory_other_items_fill_candidate_pool_to_twelve() -> None:
@@ -197,3 +197,85 @@ def test_central_bank_other_no_longer_backfills_candidate_pool() -> None:
     # only the keyword-matched commodity article remains.
     assert len(candidates) == 1
     assert candidates[0].category == ItemCategory.COMMODITY
+
+
+def test_fraud_scheme_vocabulary_routes_to_risk() -> None:
+    item = score_item(
+        _item(
+            "Company booked fictitious revenue via channel stuffing",
+            "Round-tripping inflated sales while related-party transactions were undisclosed.",
+        ),
+        now=datetime(2026, 7, 19, 1, tzinfo=timezone.utc),
+    )
+
+    assert item.category == ItemCategory.RISK
+    assert any(reason.startswith("财务造假与监管执法：") for reason in item.score_reasons)
+
+
+def test_regulatory_action_vocabulary_routes_to_risk() -> None:
+    item = score_item(
+        _item(
+            "Regulator issues Wells notice and subpoena over disgorgement",
+            "A cease-and-desist order and civil penalty followed the charges.",
+        ),
+        now=datetime(2026, 7, 19, 1, tzinfo=timezone.utc),
+    )
+
+    assert item.category == ItemCategory.RISK
+    assert any(reason.startswith("财务造假与监管执法：") for reason in item.score_reasons)
+
+
+def test_chinese_fraud_and_regulatory_terms_route_to_risk() -> None:
+    item = score_item(
+        _item(
+            "某公司财务造假被立案调查",
+            "证监会对其虚增收入行为作出行政处罚并下发警示函。",
+        ),
+        now=datetime(2026, 7, 19, 1, tzinfo=timezone.utc),
+    )
+
+    assert item.category == ItemCategory.RISK
+    assert any(reason.startswith("财务造假与监管执法：") for reason in item.score_reasons)
+
+
+def test_pure_audit_vocabulary_routes_to_governance_audit() -> None:
+    item = score_item(
+        _item(
+            "Auditor independence and Sarbanes-Oxley 10-K review",
+            "The audit committee assessed key audit matters.",
+        ),
+        now=datetime(2026, 7, 19, 1, tzinfo=timezone.utc),
+    )
+
+    assert item.category == ItemCategory.GOVERNANCE_AUDIT
+    assert any(reason.startswith("上市公司审计与治理：") for reason in item.score_reasons)
+
+
+def test_regulatory_source_bonus_is_consistent_across_risk_and_governance() -> None:
+    now = datetime(2026, 7, 19, 1, tzinfo=timezone.utc)
+    risk_item = score_item(
+        _item(
+            "Company restates financials after fraud",
+            "Material weakness in internal control was cited.",
+            source="SEC Press Releases",
+            url="https://www.sec.gov/newsroom/press-releases/risk",
+        ),
+        now=now,
+    )
+    audit_item = score_item(
+        _item(
+            "PCAOB adopts new auditing standard",
+            "Auditor independence and audit committee guidance updated.",
+            source="PCAOB",
+            url="https://pcaobus.org/news-events/news-releases/audit",
+        ),
+        now=now,
+    )
+
+    assert risk_item.category == ItemCategory.RISK
+    assert audit_item.category == ItemCategory.GOVERNANCE_AUDIT
+    # 两类监管来源都只加一次“第一方监管来源”，不再叠加“权威第一方来源”15 分
+    assert "第一方监管来源" in risk_item.score_reasons
+    assert "第一方监管来源" in audit_item.score_reasons
+    assert "权威第一方来源" not in risk_item.score_reasons
+    assert "权威第一方来源" not in audit_item.score_reasons

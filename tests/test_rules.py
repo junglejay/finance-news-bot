@@ -6,8 +6,7 @@ from app.rules import (
     AI_RULES,
     AI_TASK_DESCRIPTION,
     CATEGORY_LIMITS,
-    COMMODITY_ANCHORS,
-    MACRO_ANCHORS,
+    GOVERNANCE_AUDIT_ANCHORS,
     MAX_AI_INPUT_CANDIDATES,
     MAX_ARTICLE_CHARS,
     MAX_CANDIDATES,
@@ -20,9 +19,8 @@ from app.rules import (
 
 
 def test_keyword_dictionaries_are_non_empty() -> None:
-    assert COMMODITY_ANCHORS
-    assert MACRO_ANCHORS
     assert RISK_ANCHORS
+    assert GOVERNANCE_AUDIT_ANCHORS
     assert RESEARCH_TERMS
 
 

@@ -18,10 +18,7 @@ from .rules import (
     AUTHORITATIVE_SOURCE_PREFIXES,
     CAPITAL_MARKETS_ANCHORS,
     CATEGORY_LIMITS,
-    COMMODITY_ANCHORS,
-    COMMODITY_CONTEXT_TERMS,
     GOVERNANCE_AUDIT_ANCHORS,
-    MACRO_ANCHORS,
     MACRO_CONTEXT_TERMS,
     MAX_CANDIDATES,
     MIN_CANDIDATES,
@@ -40,12 +37,20 @@ class ScoredItem:
 
 
 def _matches(text: str, terms: set[str]) -> list[str]:
-    """Match full terms only, so e.g. `oil` does not match `boiling`."""
-    return sorted(
-        term
-        for term in terms
-        if re.search(rf"(?<!\w){re.escape(term)}(?!\w)", text, flags=re.IGNORECASE)
-    )
+    """Match full terms only for ASCII words, so e.g. `oil` does not match `boiling`.
+
+    CJK terms have no word boundary in the ``\\w`` sense - every Chinese character
+    is itself a word character - so ``(?<!\\w)`` / ``(?!\\w)`` would reject any
+    in-sentence hit. They use plain substring matching instead.
+    """
+    hits: list[str] = []
+    for term in terms:
+        if term.isascii():
+            if re.search(rf"(?<!\w){re.escape(term)}(?!\w)", text, flags=re.IGNORECASE):
+                hits.append(term)
+        elif term in text:
+            hits.append(term)
+    return sorted(hits)
 
 
 def _source_starts_with(source: str, prefixes: tuple[str, ...]) -> bool:
@@ -67,12 +72,9 @@ def _is_authoritative(item: ContentItem) -> bool:
 def score_item(item: ContentItem, now: datetime | None = None) -> ContentItem:
     now = now or datetime.now(timezone.utc)
     text = f"{item.title}\n{item.summary}".lower()
-    # commodity_anchor_hits = _matches(text, COMMODITY_ANCHORS)
-    # commodity_context_hits = _matches(text, COMMODITY_CONTEXT_TERMS)
     capital_market_hits = _matches(text, CAPITAL_MARKETS_ANCHORS)
     governance_audit_hits = _matches(text, GOVERNANCE_AUDIT_ANCHORS)
     policy_ai_hits = _matches(text, POLICY_AI_ANCHORS)
-    # macro_anchor_hits = _matches(text, MACRO_ANCHORS)
     macro_context_hits = _matches(text, MACRO_CONTEXT_TERMS)
     risk_anchor_hits = _matches(text, RISK_ANCHORS)
     risk_context_hits = _matches(text, RISK_CONTEXT_TERMS)
@@ -86,14 +88,22 @@ def score_item(item: ContentItem, now: datetime | None = None) -> ContentItem:
         if research_hits:
             score += min(35, 8 * len(research_hits))
             reasons.append("研究主题：" + "、".join(research_hits))
+    elif risk_anchor_hits:
+        item.category = ItemCategory.RISK
+        score += min(AUDIT_FRAUD_ANCHOR_CAP, AUDIT_FRAUD_ANCHOR_WEIGHT * len(risk_anchor_hits))
+        score += min(AUDIT_FRAUD_CONTEXT_CAP, AUDIT_FRAUD_CONTEXT_WEIGHT * len(risk_context_hits))
+        reasons.append("财务造假与监管执法：" + "、".join(risk_anchor_hits))
+        if _source_starts_with(item.source, REGULATORY_SOURCE_PREFIXES):
+            score += REGULATORY_SOURCE_BONUS
+            reasons.append("第一方监管来源")
     elif governance_audit_hits:
         item.category = ItemCategory.GOVERNANCE_AUDIT
         score += min(AUDIT_FRAUD_ANCHOR_CAP, AUDIT_FRAUD_ANCHOR_WEIGHT * len(governance_audit_hits))
         score += min(AUDIT_FRAUD_CONTEXT_CAP, AUDIT_FRAUD_CONTEXT_WEIGHT * len(risk_context_hits))
-        reasons.append("治理、审计与财务风险：" + "、".join(governance_audit_hits))
+        reasons.append("上市公司审计与治理：" + "、".join(governance_audit_hits))
         if _source_starts_with(item.source, REGULATORY_SOURCE_PREFIXES):
             score += REGULATORY_SOURCE_BONUS
-            reasons.append("一手监管来源")
+            reasons.append("第一方监管来源")
     elif capital_market_hits:
         item.category = ItemCategory.CAPITAL_MARKETS
         score += min(45, 12 * len(capital_market_hits))
@@ -104,14 +114,6 @@ def score_item(item: ContentItem, now: datetime | None = None) -> ContentItem:
         score += min(45, 12 * len(policy_ai_hits))
         score += min(10, 2 * len(macro_context_hits))
         reasons.append("法律政策与 AI：" + "、".join(policy_ai_hits))
-    elif risk_anchor_hits:
-        item.category = ItemCategory.RISK
-        score += min(AUDIT_FRAUD_ANCHOR_CAP, AUDIT_FRAUD_ANCHOR_WEIGHT * len(risk_anchor_hits))
-        score += min(AUDIT_FRAUD_CONTEXT_CAP, AUDIT_FRAUD_CONTEXT_WEIGHT * len(risk_context_hits))
-        reasons.append("舞弊/内控：" + "、".join(risk_anchor_hits))
-        if _source_starts_with(item.source, REGULATORY_SOURCE_PREFIXES):
-            score += REGULATORY_SOURCE_BONUS
-            reasons.append("第一方监管来源")
     else:
         item.category = ItemCategory.OTHER
 

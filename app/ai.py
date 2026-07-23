@@ -13,6 +13,16 @@ from pydantic import ValidationError
 
 from .config import Settings
 from .models import ArticleAnalysis, ContentItem, DeepReadingReport
+from .rules import (
+    AI_OUTPUT_SCHEMA_TEMPLATE,
+    AI_RULES,
+    AI_TASK_DESCRIPTION,
+    MAX_AI_ARTICLE_CHARS,
+    MAX_AI_INPUT_CANDIDATES,
+    MAX_AI_OUTPUT_ARTICLES,
+    MIN_AI_OUTPUT_ARTICLES,
+    SYSTEM_PROMPT,
+)
 
 
 class ReportGenerationError(RuntimeError):
@@ -21,19 +31,6 @@ class ReportGenerationError(RuntimeError):
 
 class ReportGenerator(Protocol):
     async def generate(self, report_date: date, candidates: list[ContentItem]) -> DeepReadingReport: ...
-
-
-SYSTEM_PROMPT = """你是一名审慎的中文金融研究编辑。你要对输入中已公开读取到正文的原始文章做逐篇深度阅读，而不是写晨报、快讯或摘要卡片。
-
-只能使用输入资料明确给出的事实；不得补充输入未支持的数字、指控、价格走势、公司事实或因果结论。必须用简体中文，保持客观，并清楚区分已披露事实、合理的研究推演和仍待核验的事项。正文内容必须用自己的话转述，绝不长句引用或大段复述原文。不要给出确定性的投资建议。
-
-严格输出 JSON 对象，不使用 Markdown 代码块，也不输出任何额外文字。"""
-
-
-MAX_AI_INPUT_CANDIDATES = 6
-MAX_AI_ARTICLE_CHARS = 5_000
-MIN_AI_OUTPUT_ARTICLES = 3
-MAX_AI_OUTPUT_ARTICLES = 4
 
 
 def _output_count_bounds(available_articles: int) -> tuple[int, int]:
@@ -69,19 +66,7 @@ def _request_prompt(
 ) -> str:
     schema = {
         "report_date": report_date.isoformat(),
-        "analyses": [
-            {
-                "title": "必须逐字取自输入",
-                "source": "必须逐字取自输入",
-                "url": "必须逐字取自输入",
-                "published_at": "必须逐字取自输入",
-                "core_thesis": "用一段说明文章的核心命题",
-                "fact_chain": ["按文章内容列出 3 至 6 个可追溯事实"],
-                "detailed_reading": "2 至 4 个自然段，解释事实之间的关系、文章的意义与边界；只做转述和明确标示的推演",
-                "transmission_or_risk": ["给出 1 至 4 条市场传导、监管风险或研究观察"],
-                "limits_and_next_checks": ["可选：指出事实缺口、反证或下一步核验项"],
-            }
-        ],
+        "analyses": [AI_OUTPUT_SCHEMA_TEMPLATE],
         "disclaimer": "本文仅供研究参考，不构成投资建议。",
     }
     instructions = {
@@ -89,20 +74,8 @@ def _request_prompt(
             f"Return between {min_analyses} and {max_analyses} distinct analyses. "
             "When both values are the same, return exactly that number of analyses."
         ),
-        "任务": (
-            "从资本市场、公司治理、注册会计师、财务风险候选中，输出 1 至 4 篇最值得阅读的深度文章解读；"
-            "重点关注审计、监管执法、财务舞弊、内部控制、AI、法律政策和执业准则。"
-        ),
-        "规则": [
-            "每一篇 analyses 只能选择 full_text_available=true 的输入条目；没有可读取正文的条目不能进入输出。",
-            "每一篇的 title、source、url、published_at 必须与一个输入条目完全一致。",
-            "优先选择事实密度、研究价值最高的文章；不要为了凑数量而选题。",
-            "fact_chain 只能包含输入正文或来源摘要能够支持的事实。",
-            "detailed_reading 必须充分解释文章逻辑，不能退化为条目式简报，也不能复制原文表达。",
-            "transmission_or_risk 可以做条件式研究推演，但必须说明其为观察而不是既成事实。",
-            "不要把不同文章的事实混在同一篇分析中。",
-            "无法得到完整正文的 Google Scholar Alert 和 Financial Times 线索不能进入深度阅读输出。",
-        ],
+        "任务": AI_TASK_DESCRIPTION,
+        "规则": AI_RULES,
         "目标 JSON": schema,
         "输入资料": _candidate_payload(candidates),
     }

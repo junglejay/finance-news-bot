@@ -21,50 +21,34 @@ from dateutil import parser as date_parser, tz
 
 from .config import Settings
 from .models import ContentItem, ItemCategory
+from .rules import (
+    ARTICLE_READER_CONCURRENCY,
+    BOJ_WHATS_NEW_RSS,
+    BOK_PRESS_RELEASES_RSS,
+    BIS_PRESS_RELEASES_RSS,
+    BIS_STATISTICAL_RELEASES_RSS,
+    CFTC_PRESS_URL,
+    EBA_NEWS_RSS,
+    ECB_NEWS_RSS,
+    ECB_STATISTICAL_RELEASES_RSS,
+    EIA_PRESS_RELEASES_RSS,
+    EIA_TODAY_IN_ENERGY_RSS,
+    FEDERAL_RESERVE_PRESS_RSS,
+    FORBES_BUSINESS_RSS,
+    FULL_TEXT_BLOCKED_SOURCES,
+    HTTPS_UPGRADE_HOSTS,
+    MAX_ARTICLE_CHARS,
+    MIN_ARTICLE_CHARS,
+    PCAOB_NEWS_URL,
+    PUBLIC_ARTICLE_DOMAINS,
+    SEC_AAER_URL,
+    SEC_PRESS_URL,
+    GUARDIAN_BUSINESS_RSS,
+    WSJ_US_BUSINESS_RSS,
+)
 
 
 logger = logging.getLogger(__name__)
-
-
-FORBES_BUSINESS_RSS = "https://www.forbes.com/business/feed/"
-EIA_TODAY_IN_ENERGY_RSS = "https://www.eia.gov/rss/todayinenergy.xml"
-EIA_PRESS_RELEASES_RSS = "https://www.eia.gov/rss/press_rss.xml"
-FEDERAL_RESERVE_PRESS_RSS = "https://www.federalreserve.gov/feeds/press_all.xml"
-BOJ_WHATS_NEW_RSS = "https://www.boj.or.jp/en/rss/whatsnew.xml"
-BOK_PRESS_RELEASES_RSS = "https://www.bok.or.kr/eng/bbs/E0000634/news.rss?menuNo=400069"
-BIS_PRESS_RELEASES_RSS = "https://www.bis.org/doclist/all_pressrels.rss"
-BIS_STATISTICAL_RELEASES_RSS = "https://www.bis.org/doclist/all_statistics.rss"
-ECB_NEWS_RSS = "https://www.ecb.europa.eu/rss/press.html"
-ECB_STATISTICAL_RELEASES_RSS = "https://www.ecb.europa.eu/rss/statpress.html"
-EUROPEAN_COMMISSION_PRESS_RSS = "https://ec.europa.eu/commission/presscorner/api/rss?language=en"
-EBA_NEWS_RSS = "https://www.eba.europa.eu/news-press/news/rss.xml"
-CFTC_PRESS_URL = "https://www.cftc.gov/PressRoom/PressReleases?TB_iframe=true&page=0"
-SEC_AAER_URL = (
-    "https://www.sec.gov/enforcement-litigation/accounting-auditing-enforcement-releases"
-    "?month=All&order=field_publish_date&sort=desc&year=All"
-)
-SEC_PRESS_URL = "https://www.sec.gov/newsroom/press-releases?month=All&year=All"
-PCAOB_NEWS_URL = "https://pcaobus.org/news-events/news-releases"
-
-# Full text is read only from public pages operated by these sources.  In
-# particular, FT and Scholar links are never fetched, even if a feed provides
-# their headline, so the workflow does not attempt to bypass subscriptions.
-PUBLIC_ARTICLE_DOMAINS = {
-    "bis.org",
-    "ecb.europa.eu",
-    "ec.europa.eu",
-    "eba.europa.eu",
-    "forbes.com",
-    "eia.gov",
-    "boj.or.jp",
-    "bok.or.kr",
-    "sec.gov",
-    "pcaobus.org",
-    "cftc.gov",
-    "federalreserve.gov",
-}
-FULL_TEXT_BLOCKED_SOURCES = {"Financial Times", "Google Scholar Alert"}
-HTTPS_UPGRADE_HOSTS = {"www.boj.or.jp"}
 
 
 class SourceFetchError(RuntimeError):
@@ -159,8 +143,8 @@ class PublicArticleReader:
     def __init__(
         self,
         extra_allowed_domains: Iterable[str] = (),
-        max_characters: int = 12_000,
-        concurrency: int = 4,
+        max_characters: int = MAX_ARTICLE_CHARS,
+        concurrency: int = ARTICLE_READER_CONCURRENCY,
     ) -> None:
         self.allowed_domains = PUBLIC_ARTICLE_DOMAINS | {domain.lower() for domain in extra_allowed_domains}
         self.max_characters = max_characters
@@ -191,7 +175,7 @@ class PublicArticleReader:
                 logger.debug(f"Skipping {item.source} - non-HTML content type: {content_type}")
                 return
             article_text = _extract_public_article_text(response.text, self.max_characters)
-            if len(article_text) < 300:
+            if len(article_text) < MIN_ARTICLE_CHARS:
                 item.metadata["article_read_status"] = f"insufficient_text_{len(article_text)}_chars"
                 logger.debug(f"Skipping {item.source} '{item.title[:50]}' - insufficient text: {len(article_text)} chars")
                 return
@@ -559,12 +543,13 @@ def build_sources(settings: Settings) -> list[Source]:
         RSSSource("BIS Statistical Releases", BIS_STATISTICAL_RELEASES_RSS),
         RSSSource("ECB News", ECB_NEWS_RSS),
         RSSSource("ECB Statistical Releases", ECB_STATISTICAL_RELEASES_RSS),
-        RSSSource("European Commission Press Corner", EUROPEAN_COMMISSION_PRESS_RSS),
         RSSSource("European Banking Authority", EBA_NEWS_RSS),
         SECListingSource("CFTC Press Releases", CFTC_PRESS_URL, settings.sec_user_agent),
         SECListingSource("SEC Accounting & Auditing Enforcement", SEC_AAER_URL, settings.sec_user_agent),
         SECListingSource("SEC Press Releases", SEC_PRESS_URL, settings.sec_user_agent),
         PCAOBNewsSource(),
+        RSSSource("Guardian Business", GUARDIAN_BUSINESS_RSS),
+        RSSSource("WSJ US Business", WSJ_US_BUSINESS_RSS),
     ]
     for name, feed_url in settings.extra_rss_feeds:
         sources.append(RSSSource(name, feed_url))

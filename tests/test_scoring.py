@@ -111,7 +111,62 @@ def test_expanded_risk_vocabulary() -> None:
     assert any(reason.startswith("舞弊/内控：") for reason in item.score_reasons)
 
 
-def test_authoritative_other_items_fill_candidate_pool_to_twelve() -> None:
+def test_regulatory_other_items_fill_candidate_pool_to_twelve() -> None:
+    now = datetime(2026, 7, 19, 1, tzinfo=timezone.utc)
+    items = [
+        score_item(
+            _item(
+                "Crude oil supply update",
+                "Oil inventories declined.",
+                url="https://example.test/oil",
+            ),
+            now=now,
+        )
+    ]
+    items.extend(
+        score_item(
+            _item(
+                f"Official statistical release {index}",
+                "A first-party statistical update.",
+                source="SEC Press Releases",
+                url=f"https://www.sec.gov/newsroom/press-releases/{index}",
+            ),
+            now=now,
+        )
+        for index in range(11)
+    )
+
+    candidates = select_candidates(items)
+
+    assert len(candidates) == 12
+    assert all(
+        item.category != ItemCategory.OTHER or "权威第一方来源" in item.score_reasons
+        for item in candidates
+    )
+
+
+def test_candidate_pool_is_capped_at_sixteen() -> None:
+    now = datetime(2026, 7, 19, 1, tzinfo=timezone.utc)
+    items = [
+        score_item(
+            _item(
+                f"Official statistical release {index}",
+                "A first-party statistical update.",
+                source="SEC Press Releases",
+                url=f"https://www.sec.gov/newsroom/press-releases/{index}",
+            ),
+            now=now,
+        )
+        for index in range(20)
+    ]
+
+    candidates = select_candidates(items)
+
+    assert len(candidates) == MAX_CANDIDATES
+    assert all("权威第一方来源" in item.score_reasons for item in candidates)
+
+
+def test_central_bank_other_no_longer_backfills_candidate_pool() -> None:
     now = datetime(2026, 7, 19, 1, tzinfo=timezone.utc)
     items = [
         score_item(
@@ -138,29 +193,7 @@ def test_authoritative_other_items_fill_candidate_pool_to_twelve() -> None:
 
     candidates = select_candidates(items)
 
-    assert len(candidates) == 12
-    assert all(
-        item.category != ItemCategory.OTHER or "权威第一方来源" in item.score_reasons
-        for item in candidates
-    )
-
-
-def test_candidate_pool_is_capped_at_sixteen() -> None:
-    now = datetime(2026, 7, 19, 1, tzinfo=timezone.utc)
-    items = [
-        score_item(
-            _item(
-                f"Official statistical release {index}",
-                "A first-party statistical update.",
-                source="Federal Reserve Press Releases",
-                url=f"https://www.federalreserve.gov/releases/{index}.htm",
-            ),
-            now=now,
-        )
-        for index in range(20)
-    ]
-
-    candidates = select_candidates(items)
-
-    assert len(candidates) == MAX_CANDIDATES
-    assert all("权威第一方来源" in item.score_reasons for item in candidates)
+    # Central-bank/statistical-agency OTHER items no longer backfill the pool;
+    # only the keyword-matched commodity article remains.
+    assert len(candidates) == 1
+    assert candidates[0].category == ItemCategory.COMMODITY

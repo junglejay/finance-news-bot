@@ -12,6 +12,7 @@ from .ai import BriefGenerator, OpenAICompatibleBriefGenerator
 from .config import Settings
 from .dingtalk import DingTalkNotifier
 from .models import ContentItem
+from .rules import DEFAULT_WINDOW_HOURS, WEEKEND_WINDOW_HOURS
 from .scoring import score_item, select_candidates
 from .sources import PublicArticleReader, Source, build_sources
 
@@ -127,7 +128,7 @@ class BriefService:
     @staticmethod
     def _window_start(now: datetime, weekday: int) -> datetime:
         # Monday includes the previous Friday after the scheduled cutoff plus the weekend.
-        return now - timedelta(hours=72 if weekday == 0 else 24)
+        return now - timedelta(hours=WEEKEND_WINDOW_HOURS if weekday == 0 else DEFAULT_WINDOW_HOURS)
 
     async def _notify_fault_safely(self, error: str) -> None:
         try:

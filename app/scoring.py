@@ -8,295 +8,29 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from .models import ContentItem, ItemCategory
-
-
-COMMODITY_ANCHORS = {
-    "agriculture",
-    "aluminium",
-    "aluminum",
-    "barley",
-    "commodity",
-    "commodities",
-    "coal",
-    "cocoa",
-    "coffee",
-    "corn",
-    "cotton",
-    "copper",
-    "futures",
-    "crude",
-    "diesel",
-    "gasoline",
-    "oil",
-    "wti",
-    "brent",
-    "opec",
-    "gold",
-    "bullion",
-    "iron ore",
-    "jet fuel",
-    "lithium",
-    "maize",
-    "nickel",
-    "palladium",
-    "platinum",
-    "refinery",
-    "natural gas",
-    "lng",
-    "silver",
-    "soybean",
-    "soybeans",
-    "sugar",
-    "uranium",
-    "wheat",
-    "zinc",
-}
-COMMODITY_CONTEXT_TERMS = {
-    "supply",
-    "demand",
-    "inventory",
-    "inventories",
-    "import",
-    "imports",
-    "export",
-    "exports",
-    "output cut",
-    "output cuts",
-    "production cost",
-    "output",
-    "shortage",
-    "stockpile",
-    "stockpiles",
-    "surplus",
-}
-CAPITAL_MARKETS_ANCHORS = {
-    "capital market",
-    "capital markets",
-    "equity market",
-    "equity markets",
-    "stock market",
-    "stock markets",
-    "securities market",
-    "securities markets",
-    "ipo",
-    "initial public offering",
-    "listing",
-    "delisting",
-    "bond market",
-    "bond markets",
-    "corporate bond",
-    "credit spread",
-    "资本市场",
-    "股票市场",
-    "证券市场",
-    "首次公开募股",
-    "上市",
-    "退市",
-    "债券市场",
-}
-GOVERNANCE_AUDIT_ANCHORS = {
-    "corporate governance",
-    "board governance",
-    "board of directors",
-    "certified public accountant",
-    "certified public accountants",
-    "cpa",
-    "financial risk",
-    "financial reporting",
-    "audit",
-    "auditing",
-    "regulatory enforcement",
-    "enforcement action",
-    "financial fraud",
-    "financial statement fraud",
-    "internal control",
-    "internal controls",
-    "professional standards",
-    "auditing standards",
-    "accounting standards",
-    "gaap",
-    "ifrs",
-    "公司治理",
-    "注册会计师",
-    "财务风险",
-    "审计",
-    "监管执法",
-    "财务舞弊",
-    "内部控制",
-    "执业准则",
-    "会计准则",
-    "审计准则",
-}
-POLICY_AI_ANCHORS = {
-    "ai",
-    "artificial intelligence",
-    "generative ai",
-    "machine learning",
-    "large language model",
-    "ai governance",
-    "ai regulation",
-    "ai policy",
-    "legal policy",
-    "public policy",
-    "legislation",
-    "legislative",
-    "rulemaking",
-    "regulatory framework",
-    "legal framework",
-    "legal reform",
-    "人工智能",
-    "生成式人工智能",
-    "机器学习",
-    "大语言模型",
-    "ai治理",
-    "ai监管",
-    "ai政策",
-    "法律政策",
-    "立法",
-    "政策法规",
-}
-MACRO_ANCHORS = {
-    "bond yield",
-    "bond yields",
-    "central bank",
-    "china demand",
-    "consumer price index",
-    "cpi",
-    "dollar",
-    "ecb",
-    "european central bank",
-    "fed",
-    "federal reserve",
-    "fomc",
-    "geopolitical",
-    "geopolitics",
-    "inflation",
-    "interest rate",
-    "interest rates",
-    "monetary policy",
-    "ppi",
-    "producer price index",
-    "rate cut",
-    "rate cuts",
-    "rate hike",
-    "rate hikes",
-    "sanction",
-    "sanctions",
-    "supply chain",
-    "tariff",
-    "tariffs",
-    "trade war",
-    "treasury yield",
-    "treasury yields",
-    "usd",
-}
-MACRO_CONTEXT_TERMS = {
-    "economic growth",
-    "employment",
-    "exchange rate",
-    "exports",
-    "gdp",
-    "imports",
-    "payrolls",
-    "recession",
-    "trade",
-    "yield",
-    "yields",
-}
-RISK_ANCHORS = {
-    "fraud",
-    "accounting",
-    "financial statement",
-    "audit",
-    "auditing",
-    "bribery",
-    "compliance",
-    "control deficiency",
-    "controls deficiency",
-    "corruption",
-    "embezzlement",
-    "fcpa",
-    "going concern",
-    "governance",
-    "internal control",
-    "material weakness",
-    "restatement",
-    "misstatement",
-    "securities violation",
-    "whistleblower",
-}
-RISK_CONTEXT_TERMS = {
-    "enforcement",
-    "enforcement action",
-    "charges",
-    "disclosure",
-    "fine",
-    "investigation",
-    "lawsuit",
-    "penalty",
-    "settlement",
-    "violation",
-}
-RESEARCH_TERMS = {
-    "commodity futures",
-    "crude oil",
-    "gold",
-    "macroeconomics",
-    "monetary policy",
-    "financial statement fraud",
-    "internal control",
-    "forensic accounting",
-    "asset pricing",
-    "quantitative finance",
-}
-
-AUTHORITATIVE_SOURCE_PREFIXES = (
-    "BIS",
-    "Bank of Japan",
-    "Bank of Korea",
-    "CFTC",
-    "ECB",
-    "European Banking Authority",
-    "European Central Bank",
-    "European Commission",
-    "Federal Reserve",
-    "IMF",
-    "OECD",
-    "PCAOB",
-    "SEC",
-    "U.S. EIA",
-    "World Bank",
+from .rules import (
+    AUDIT_FRAUD_ANCHOR_CAP,
+    AUDIT_FRAUD_ANCHOR_WEIGHT,
+    AUDIT_FRAUD_CONTEXT_CAP,
+    AUDIT_FRAUD_CONTEXT_WEIGHT,
+    REGULATORY_SOURCE_BONUS,
+    AUTHORITATIVE_DOMAINS,
+    AUTHORITATIVE_SOURCE_PREFIXES,
+    CAPITAL_MARKETS_ANCHORS,
+    CATEGORY_LIMITS,
+    COMMODITY_ANCHORS,
+    COMMODITY_CONTEXT_TERMS,
+    GOVERNANCE_AUDIT_ANCHORS,
+    MACRO_ANCHORS,
+    MACRO_CONTEXT_TERMS,
+    MAX_CANDIDATES,
+    MIN_CANDIDATES,
+    POLICY_AI_ANCHORS,
+    REGULATORY_SOURCE_PREFIXES,
+    RESEARCH_TERMS,
+    RISK_ANCHORS,
+    RISK_CONTEXT_TERMS,
 )
-AUTHORITATIVE_DOMAINS = {
-    "bis.org",
-    "bls.gov",
-    "boj.or.jp",
-    "bok.or.kr",
-    "cftc.gov",
-    "ecb.europa.eu",
-    "ec.europa.eu",
-    "eba.europa.eu",
-    "eia.gov",
-    "federalreserve.gov",
-    "imf.org",
-    "oecd.org",
-    "pcaobus.org",
-    "sec.gov",
-    "worldbank.org",
-}
-REGULATORY_SOURCE_PREFIXES = ("CFTC", "PCAOB", "SEC")
-
-MIN_CANDIDATES = 12
-MAX_CANDIDATES = 16
-CATEGORY_LIMITS = {
-    ItemCategory.COMMODITY: 6,
-    ItemCategory.MACRO: 4,
-    ItemCategory.CAPITAL_MARKETS: 4,
-    ItemCategory.GOVERNANCE_AUDIT: 4,
-    ItemCategory.RISK: 4,
-    ItemCategory.POLICY_AI: 3,
-    ItemCategory.RESEARCH: 2,
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,11 +88,11 @@ def score_item(item: ContentItem, now: datetime | None = None) -> ContentItem:
             reasons.append("研究主题：" + "、".join(research_hits))
     elif governance_audit_hits:
         item.category = ItemCategory.GOVERNANCE_AUDIT
-        score += min(45, 12 * len(governance_audit_hits))
-        score += min(10, 2 * len(risk_context_hits))
+        score += min(AUDIT_FRAUD_ANCHOR_CAP, AUDIT_FRAUD_ANCHOR_WEIGHT * len(governance_audit_hits))
+        score += min(AUDIT_FRAUD_CONTEXT_CAP, AUDIT_FRAUD_CONTEXT_WEIGHT * len(risk_context_hits))
         reasons.append("治理、审计与财务风险：" + "、".join(governance_audit_hits))
         if _source_starts_with(item.source, REGULATORY_SOURCE_PREFIXES):
-            score += 25
+            score += REGULATORY_SOURCE_BONUS
             reasons.append("一手监管来源")
     elif capital_market_hits:
         item.category = ItemCategory.CAPITAL_MARKETS
@@ -374,11 +108,11 @@ def score_item(item: ContentItem, now: datetime | None = None) -> ContentItem:
         len(commodity_anchor_hits), len(macro_anchor_hits)
     ):
         item.category = ItemCategory.RISK
-        score += min(45, 12 * len(risk_anchor_hits))
-        score += min(10, 2 * len(risk_context_hits))
+        score += min(AUDIT_FRAUD_ANCHOR_CAP, AUDIT_FRAUD_ANCHOR_WEIGHT * len(risk_anchor_hits))
+        score += min(AUDIT_FRAUD_CONTEXT_CAP, AUDIT_FRAUD_CONTEXT_WEIGHT * len(risk_context_hits))
         reasons.append("舞弊/内控：" + "、".join(risk_anchor_hits))
         if _source_starts_with(item.source, REGULATORY_SOURCE_PREFIXES):
-            score += 25
+            score += REGULATORY_SOURCE_BONUS
             reasons.append("第一方监管来源")
     elif commodity_anchor_hits and len(commodity_anchor_hits) >= len(macro_anchor_hits):
         item.category = ItemCategory.COMMODITY
@@ -434,10 +168,16 @@ def select_candidates(items: list[ContentItem]) -> list[ContentItem]:
         if len(selected) >= MAX_CANDIDATES:
             break
 
-    # First-party releases can matter before they use the vocabulary above.
-    # Preserve them even when deterministic scoring leaves them as OTHER.
+    # Regulatory agencies (CFTC/PCAOB/SEC) can matter before they use the
+    # vocabulary above, so preserve their releases even when deterministic
+    # scoring leaves them as OTHER. Central banks and statistical agencies
+    # (Fed/ECB/BIS/...) only enter when they match at least one keyword, to
+    # avoid padding the pool with unrelated statistical releases.
     for item in ranked:
-        if _is_authoritative(item):
+        if _is_authoritative(item) and (
+            item.category != ItemCategory.OTHER
+            or _source_starts_with(item.source, REGULATORY_SOURCE_PREFIXES)
+        ):
             add(item)
 
     # If one category is unusually busy, use its overflow to reach the target

@@ -81,7 +81,7 @@ class DeepReadingReport(BaseModel):
     disclaimer: str = "本文仅供研究参考，不构成投资建议。"
 
     def to_markdown(self) -> str:
-        lines = [f"# 商品与风控情报：深度阅读（{self.report_date.isoformat()}）", ""]
+        lines = [f"# 全球资本市场风控与监管：深度阅读（{self.report_date.isoformat()}）", ""]
         for index, item in enumerate(self.analyses, start=1):
             lines.extend(
                 [

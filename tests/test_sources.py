@@ -147,8 +147,9 @@ def test_build_sources_includes_authoritative_default_and_extra_feeds(settings) 
         "ECB News",
         "ECB Statistical Releases",
         "CFTC Press Releases",
-        "European Commission Press Corner",
         "European Banking Authority",
+        "Guardian Business",
+        "WSJ US Business",
     } <= source_names
     assert "Custom authority" in source_names
 

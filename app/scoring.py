@@ -67,12 +67,12 @@ def _is_authoritative(item: ContentItem) -> bool:
 def score_item(item: ContentItem, now: datetime | None = None) -> ContentItem:
     now = now or datetime.now(timezone.utc)
     text = f"{item.title}\n{item.summary}".lower()
-    commodity_anchor_hits = _matches(text, COMMODITY_ANCHORS)
-    commodity_context_hits = _matches(text, COMMODITY_CONTEXT_TERMS)
+    # commodity_anchor_hits = _matches(text, COMMODITY_ANCHORS)
+    # commodity_context_hits = _matches(text, COMMODITY_CONTEXT_TERMS)
     capital_market_hits = _matches(text, CAPITAL_MARKETS_ANCHORS)
     governance_audit_hits = _matches(text, GOVERNANCE_AUDIT_ANCHORS)
     policy_ai_hits = _matches(text, POLICY_AI_ANCHORS)
-    macro_anchor_hits = _matches(text, MACRO_ANCHORS)
+    # macro_anchor_hits = _matches(text, MACRO_ANCHORS)
     macro_context_hits = _matches(text, MACRO_CONTEXT_TERMS)
     risk_anchor_hits = _matches(text, RISK_ANCHORS)
     risk_context_hits = _matches(text, RISK_CONTEXT_TERMS)
@@ -104,9 +104,7 @@ def score_item(item: ContentItem, now: datetime | None = None) -> ContentItem:
         score += min(45, 12 * len(policy_ai_hits))
         score += min(10, 2 * len(macro_context_hits))
         reasons.append("法律政策与 AI：" + "、".join(policy_ai_hits))
-    elif risk_anchor_hits and len(risk_anchor_hits) >= max(
-        len(commodity_anchor_hits), len(macro_anchor_hits)
-    ):
+    elif risk_anchor_hits:
         item.category = ItemCategory.RISK
         score += min(AUDIT_FRAUD_ANCHOR_CAP, AUDIT_FRAUD_ANCHOR_WEIGHT * len(risk_anchor_hits))
         score += min(AUDIT_FRAUD_CONTEXT_CAP, AUDIT_FRAUD_CONTEXT_WEIGHT * len(risk_context_hits))
@@ -114,16 +112,6 @@ def score_item(item: ContentItem, now: datetime | None = None) -> ContentItem:
         if _source_starts_with(item.source, REGULATORY_SOURCE_PREFIXES):
             score += REGULATORY_SOURCE_BONUS
             reasons.append("第一方监管来源")
-    elif commodity_anchor_hits and len(commodity_anchor_hits) >= len(macro_anchor_hits):
-        item.category = ItemCategory.COMMODITY
-        score += min(45, 12 * len(commodity_anchor_hits))
-        score += min(10, 2 * len(commodity_context_hits))
-        reasons.append("商品/期货：" + "、".join(commodity_anchor_hits))
-    elif macro_anchor_hits:
-        item.category = ItemCategory.MACRO
-        score += min(45, 12 * len(macro_anchor_hits))
-        score += min(10, 2 * len(macro_context_hits))
-        reasons.append("宏观驱动：" + "、".join(macro_anchor_hits))
     else:
         item.category = ItemCategory.OTHER
 

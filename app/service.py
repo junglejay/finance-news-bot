@@ -1,4 +1,4 @@
-"""One-shot ingestion-to-delivery workflow with URL-only duplicate history."""
+"""One-shot ingestion-to-delivery workflow with minimal delivery history."""
 
 from __future__ import annotations
 
@@ -13,7 +13,12 @@ from .config import Settings
 from .dingtalk import DingTalkNotifier
 from .history import DeliveryHistory
 from .models import ContentItem
-from .rules import DEFAULT_WINDOW_HOURS, WEEKEND_WINDOW_HOURS
+from .rules import (
+    DEFAULT_WINDOW_HOURS,
+    MAINLAND_CHINA_SOURCES,
+    MAX_MAINLAND_CHINA_CANDIDATES,
+    WEEKEND_WINDOW_HOURS,
+)
 from .scoring import score_item, select_candidates
 from .sources import PublicArticleReader, Source, build_sources
 
@@ -41,7 +46,8 @@ class BriefService:
 
     The service stores no source excerpts, credentials, or generated reports. A small
     URL-and-timestamp history prevents repeated delivery after manual reruns or
-    overlapping source timestamps while the default source window remains 24 hours.
+    overlapping source timestamps. An aggregate date marker also preserves the
+    one-Mainland-article daily quota across same-day reruns.
     """
 
     def __init__(
@@ -82,6 +88,10 @@ class BriefService:
         result = RunResult(status="running", report_date=report_date.isoformat())
         collected: dict[str, ContentItem] = {}
         delivered_urls = self.history.delivered_urls(now)
+        mainland_already_delivered = self.history.mainland_delivered_on(
+            report_date,
+            now,
+        )
 
         async def fetch_one(source: Source) -> tuple[Source, list[ContentItem], Exception | None]:
             try:
@@ -117,7 +127,14 @@ class BriefService:
             result.source_failures.append(f"Public article reader: {exc}")
         scored_items = [score_item(item, now) for item in all_items]
 
-        candidates = select_candidates(scored_items)
+        candidates = select_candidates(
+            scored_items,
+            mainland_limit=(
+                0
+                if mainland_already_delivered
+                else MAX_MAINLAND_CHINA_CANDIDATES
+            ),
+        )
         result.candidate_count = len(candidates)
         logger.info("Selected %d candidates after full-text-aware scoring", result.candidate_count)
         if not candidates:
@@ -144,9 +161,20 @@ class BriefService:
         try:
             report = await self.generator.generate(report_date, candidates)
             await self.notifier.send_report(report)
+            delivered_analysis_urls = [analysis.url for analysis in report.analyses]
+            mainland_candidate_urls = {
+                item.url
+                for item in candidates
+                if item.source in MAINLAND_CHINA_SOURCES
+            }
             self.history.mark_delivered(
-                (analysis.url for analysis in report.analyses),
+                delivered_analysis_urls,
                 now,
+                mainland_report_date=(
+                    report_date
+                    if mainland_candidate_urls.intersection(delivered_analysis_urls)
+                    else None
+                ),
             )
             result.status = "success"
             return result

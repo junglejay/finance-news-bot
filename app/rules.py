@@ -14,6 +14,11 @@ SEC_LITIGATION_RSS = "https://www.sec.gov/enforcement-litigation/litigation-rele
 SEC_ADMIN_PROCEEDINGS_RSS = (
     "https://www.sec.gov/enforcement-litigation/administrative-proceedings/rss"
 )
+SEC_CURRENT_8K_ATOM = (
+    "https://www.sec.gov/cgi-bin/browse-edgar"
+    "?action=getcurrent&type=8-k&company=&dateb=&owner=include"
+    "&start=0&count=100&output=atom"
+)
 PCAOB_NEWS_URL = "https://pcaobus.org/news-events"
 # The unfiltered listing is intentional: FRC publishes audit inspection and
 # enforcement reviews under "Publications", not only under its investigation
@@ -23,6 +28,14 @@ IAASB_NEWS_URL = "https://www.iaasb.org/news"
 ASIC_MEDIA_RELEASES_API = "https://www.asic.gov.au/_data/mr2023/"
 AFRC_PRESS_RELEASES_URL = "https://www.afrc.org.hk/en-hk/news-centre/press-releases/"
 THOMSON_REUTERS_PCAOB_URL = "https://tax.thomsonreuters.com/news/topic/pcaob/"
+HKEX_TITLE_SEARCH_URL = "https://www1.hkexnews.hk/search/titleSearchServlet.do"
+TDNET_DAILY_LIST_URL = "https://www.release.tdnet.info/inbs/I_list_001_{date}.html"
+CPAAOB_INSPECTION_RECOMMENDATIONS_URL = (
+    "https://www.fsa.go.jp/cpaaob/shinsakensa/kankoku/index.html"
+)
+CPAAOB_MONITORING_REPORTS_URL = (
+    "https://www.fsa.go.jp/cpaaob/shinsakensa/kihonkeikaku/index.html"
+)
 CNINFO_ANNOUNCEMENTS_API = "https://www.cninfo.com.cn/new/hisAnnouncement/query"
 CNINFO_PDF_BASE_URL = "https://static.cninfo.com.cn/"
 
@@ -46,10 +59,14 @@ PUBLIC_ARTICLE_DOMAINS = {
     "csrc.gov.cn",
     "cninfo.com.cn",
     "frc.org.uk",
+    "fsa.go.jp",
+    "hkexnews.hk",
     "iaasb.org",
     "mof.gov.cn",
     "pcaobus.org",
+    "release.tdnet.info",
     "sec.gov",
+    "sfc.hk",
     "thomsonreuters.com",
 }
 FULL_TEXT_BLOCKED_SOURCES = {"Financial Times", "Google Scholar Alert"}
@@ -366,6 +383,9 @@ AUTHORITATIVE_SOURCE_PREFIXES = (
     "AFRC",
     "ASIC",
     "IAASB",
+    "HKEX",
+    "Japan CPAAOB",
+    "Japan TDnet",
     "PCAOB",
     "SEC",
     "UK FRC",
@@ -377,14 +397,20 @@ AUTHORITATIVE_DOMAINS = {
     "asic.gov.au",
     "csrc.gov.cn",
     "frc.org.uk",
+    "fsa.go.jp",
+    "hkexnews.hk",
     "iaasb.org",
     "mof.gov.cn",
     "pcaobus.org",
+    "release.tdnet.info",
     "sec.gov",
+    "sfc.hk",
 }
 REGULATORY_SOURCE_PREFIXES = (
     "AFRC",
     "ASIC",
+    "HKEX",
+    "Japan CPAAOB",
     "PCAOB",
     "SEC",
     "UK FRC",
@@ -392,13 +418,37 @@ REGULATORY_SOURCE_PREFIXES = (
     "财政部",
 )
 DEDICATED_FRAUD_SOURCE_PREFIXES = ("SEC Accounting & Auditing Enforcement",)
-DEDICATED_AUDIT_SOURCE_PREFIXES = ("AFRC", "ASIC", "UK FRC", "IAASB")
+DEDICATED_AUDIT_SOURCE_PREFIXES = (
+    "AFRC",
+    "ASIC",
+    "UK FRC",
+    "IAASB",
+    "Japan CPAAOB",
+)
+
+# Exchange filings are admitted only after source-specific title/item filters,
+# so their assigned audit/reporting category should survive the generic
+# English/Chinese classifier.
+FOCUSED_DISCLOSURE_SOURCE_PREFIXES = (
+    "SEC 8-K Accounting Filings",
+    "Japan TDnet Audit & Reporting",
+    "HKEX Audit & Reporting",
+)
 
 
 # --- 4. Candidate selection and scoring ---------------------------------------
 
 MAX_CANDIDATES = 12
 MAX_ITEMS_PER_SOURCE = 4
+MAX_MAINLAND_CHINA_CANDIDATES = 1
+MAINLAND_CHINA_SOURCES = frozenset(
+    {
+        "中国证监会行政处罚",
+        "中国证监会要闻",
+        "巨潮资讯年报问询与审计回复",
+        "财政部行政处罚",
+    }
+)
 MIN_RELEVANCE_SCORE = 55
 CATEGORY_LIMITS = {
     ItemCategory.FRAUD_ENFORCEMENT: 5,

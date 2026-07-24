@@ -60,4 +60,7 @@ def test_public_article_domains_cover_core_regulators() -> None:
         "iaasb.org",
         "csrc.gov.cn",
         "mof.gov.cn",
+        "fsa.go.jp",
+        "release.tdnet.info",
+        "hkexnews.hk",
     } <= PUBLIC_ARTICLE_DOMAINS

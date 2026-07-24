@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from email.message import EmailMessage
 
 import pytest
@@ -14,14 +14,20 @@ from app.sources import (
     PublicArticleReader,
     RSSSource,
     build_sources,
+    extract_sec_8k_accounting_sections,
+    extract_sec_8k_primary_url,
     parse_asic_records,
+    parse_cpaaob_listing,
     parse_cninfo_records,
     parse_csrc_records,
     parse_dated_listing,
+    parse_hkex_records,
     parse_mof_listing,
     parse_newsletter_message,
     parse_pcaob_listing,
     parse_scholar_message,
+    parse_sec_8k_feed,
+    parse_tdnet_listing,
     parse_thomson_reuters_topic,
 )
 
@@ -94,6 +100,125 @@ def test_parse_asic_records_prefers_actual_create_timestamp() -> None:
     items = parse_asic_records(payload, SINCE)
 
     assert items[0].published_at.isoformat() == "2026-07-19T04:30:00+00:00"
+
+
+def test_parse_sec_8k_feed_keeps_only_audit_and_restatement_items() -> None:
+    atom = """
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <title>8-K - Example Issuer (Filer)</title>
+        <link href="https://www.sec.gov/Archives/example-index.htm"/>
+        <updated>2026-07-18T14:30:00-04:00</updated>
+        <summary>Filed: 2026-07-18; Item 4.01: Changes in Registrant's Certifying Accountant</summary>
+      </entry>
+      <entry>
+        <title>8-K - Unrelated Issuer (Filer)</title>
+        <link href="https://www.sec.gov/Archives/unrelated-index.htm"/>
+        <updated>2026-07-18T14:20:00-04:00</updated>
+        <summary>Filed: 2026-07-18; Item 8.01: Other Events</summary>
+      </entry>
+    </feed>
+    """
+
+    items = parse_sec_8k_feed(atom, SINCE)
+
+    assert len(items) == 1
+    assert items[0].source == "SEC 8-K Accounting Filings"
+    assert items[0].category == ItemCategory.PUBLIC_COMPANY_AUDIT
+    assert items[0].metadata["item_codes"] == ["4.01"]
+
+
+def test_sec_8k_index_and_section_extractors_target_primary_disclosure() -> None:
+    index_html = """
+    <table>
+      <tr><td>1</td><td><a href="/ix?doc=/Archives/edgar/data/1/form8-k.htm">form8-k.htm</a></td>
+      <td>Current report</td><td>8-K</td></tr>
+    </table>
+    """
+    filing_html = """
+    <html><body>
+      <p>Item 4.01</p><p>Item 5.02</p>
+      <h2>Item 4.01 Changes in Registrant's Certifying Accountant</h2>
+      <p>The audit committee dismissed Old Auditor and appointed New Auditor.</p>
+      <p>There were no disagreements on accounting principles.</p>
+      <h2>Item 5.02 Departure of Directors</h2><p>Unrelated governance text.</p>
+    </body></html>
+    """
+
+    primary_url = extract_sec_8k_primary_url(
+        index_html,
+        "https://www.sec.gov/Archives/edgar/data/1/example-index.htm",
+    )
+    section = extract_sec_8k_accounting_sections(filing_html, ["4.01"])
+
+    assert primary_url == "https://www.sec.gov/Archives/edgar/data/1/form8-k.htm"
+    assert "dismissed Old Auditor" in section
+    assert "Unrelated governance text" not in section
+
+
+def test_parse_tdnet_listing_keeps_targeted_auditor_change_only() -> None:
+    html = """
+    <table>
+      <tr>
+        <td class="kjTime">15:30</td><td class="kjCode">1234</td>
+        <td class="kjName">Example株式会社</td>
+        <td class="kjTitle"><a href="audit-change.pdf">会計監査人の異動に関するお知らせ</a></td>
+      </tr>
+      <tr>
+        <td class="kjTime">15:00</td><td class="kjCode">5678</td>
+        <td class="kjName">Routine株式会社</td>
+        <td class="kjTitle"><a href="board.pdf">監査役の選任に関するお知らせ</a></td>
+      </tr>
+    </table>
+    """
+
+    items = parse_tdnet_listing(
+        html,
+        "https://www.release.tdnet.info/inbs/I_list_001_20260718.html",
+        date(2026, 7, 18),
+        SINCE,
+    )
+
+    assert len(items) == 1
+    assert items[0].category == ItemCategory.PUBLIC_COMPANY_AUDIT
+    assert items[0].metadata["region"] == "Japan"
+
+
+def test_parse_hkex_records_rejects_routine_reappointment() -> None:
+    payload = {
+        "result": """[
+          {"STOCK_NAME":"Example Holdings","STOCK_CODE":"01234",
+           "TITLE":"CHANGE OF AUDITOR","DATE_TIME":"18/07/2026 16:30",
+           "FILE_LINK":"/listedco/listconews/sehk/2026/0718/example.pdf"},
+          {"STOCK_NAME":"Routine Holdings","STOCK_CODE":"05678",
+           "TITLE":"RE-APPOINTMENT OF AUDITOR","DATE_TIME":"18/07/2026 16:00",
+           "FILE_LINK":"/listedco/listconews/sehk/2026/0718/routine.pdf"}
+        ]"""
+    }
+
+    items = parse_hkex_records(payload, SINCE)
+
+    assert len(items) == 1
+    assert items[0].title.endswith("CHANGE OF AUDITOR")
+    assert items[0].metadata["region"] == "Hong Kong"
+
+
+def test_parse_cpaaob_listing_supports_reiwa_dates() -> None:
+    html = """
+    <ul><li>令和8年7月18日
+      <a href="./example.pdf">監査法人に対する検査結果に基づく勧告</a>
+    </li></ul>
+    """
+
+    items = parse_cpaaob_listing(
+        html,
+        "https://www.fsa.go.jp/cpaaob/shinsakensa/kankoku/index.html",
+        SINCE,
+    )
+
+    assert len(items) == 1
+    assert items[0].published_at.date().isoformat() == "2026-07-18"
+    assert items[0].category == ItemCategory.PUBLIC_COMPANY_AUDIT
 
 
 def test_parse_dated_listing_supports_frc_day_month_year() -> None:
@@ -422,6 +547,10 @@ def test_build_sources_is_focused_on_audit_and_regulatory_material(settings) -> 
         "AFRC Hong Kong",
         "SEC Litigation Releases",
         "SEC Administrative Proceedings",
+        "SEC 8-K Accounting Filings",
+        "Japan TDnet Audit & Reporting",
+        "Japan CPAAOB Audit Oversight",
+        "HKEX Audit & Reporting",
         "中国证监会行政处罚",
         "中国证监会要闻",
         "巨潮资讯年报问询与审计回复",
@@ -448,6 +577,10 @@ def test_core_regulator_articles_are_allowed_by_default() -> None:
         ("IAASB", "https://www.iaasb.org/example"),
         ("Thomson Reuters PCAOB", "https://tax.thomsonreuters.com/news/example"),
         ("巨潮资讯年报问询与审计回复", "https://static.cninfo.com.cn/example.pdf"),
+        ("SEC 8-K Accounting Filings", "https://www.sec.gov/Archives/example.htm"),
+        ("Japan TDnet Audit & Reporting", "https://www.release.tdnet.info/example.pdf"),
+        ("Japan CPAAOB Audit Oversight", "https://www.fsa.go.jp/cpaaob/example.pdf"),
+        ("HKEX Audit & Reporting", "https://www1.hkexnews.hk/example.pdf"),
     ):
         assert reader._is_allowed(
             ContentItem(

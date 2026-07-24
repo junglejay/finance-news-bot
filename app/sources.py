@@ -6,14 +6,15 @@ import asyncio
 import email
 import imaplib
 import io
+import json
 import logging
 import re
 from abc import ABC, abstractmethod
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from email.header import decode_header, make_header
 from email.utils import parsedate_to_datetime
 from typing import Iterable
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import unquote, urljoin, urlsplit
 from zoneinfo import ZoneInfo
 
 import feedparser
@@ -29,10 +30,13 @@ from .rules import (
     ASIC_MEDIA_RELEASES_API,
     CNINFO_ANNOUNCEMENTS_API,
     CNINFO_PDF_BASE_URL,
+    CPAAOB_INSPECTION_RECOMMENDATIONS_URL,
+    CPAAOB_MONITORING_REPORTS_URL,
     CSRC_NEWS_API,
     CSRC_PENALTIES_API,
     FRC_AUDIT_ENFORCEMENT_URL,
     FULL_TEXT_BLOCKED_SOURCES,
+    HKEX_TITLE_SEARCH_URL,
     IAASB_NEWS_URL,
     MAX_ARTICLE_CHARS,
     MIN_ARTICLE_CHARS,
@@ -41,8 +45,10 @@ from .rules import (
     PUBLIC_ARTICLE_DOMAINS,
     SEC_AAER_RSS,
     SEC_ADMIN_PROCEEDINGS_RSS,
+    SEC_CURRENT_8K_ATOM,
     SEC_LITIGATION_RSS,
     SEC_PRESS_RSS,
+    TDNET_DAILY_LIST_URL,
     THOMSON_REUTERS_PCAOB_URL,
 )
 
@@ -124,6 +130,550 @@ class RSSSource(Source):
                 )
             )
         return items
+
+
+_SEC_8K_ACCOUNTING_ITEM_PATTERN = re.compile(r"\bItem\s+4\.0([12])\b", re.IGNORECASE)
+
+
+def parse_sec_8k_feed(content: bytes | str, since: datetime) -> list[ContentItem]:
+    """Keep only current 8-K filings whose item codes concern audit/reporting."""
+    parsed = feedparser.parse(content)
+    now = datetime.now(timezone.utc)
+    items: list[ContentItem] = []
+    for entry in parsed.entries:
+        title = _clean_text(entry.get("title", ""))
+        url = str(entry.get("link", "")).strip()
+        summary = _clean_text(entry.get("summary") or entry.get("description", ""))
+        item_codes = sorted(
+            {f"4.0{match}" for match in _SEC_8K_ACCOUNTING_ITEM_PATTERN.findall(summary)}
+        )
+        if not title or not url or not item_codes:
+            continue
+        published = _to_utc(entry.get("updated") or entry.get("published"), now)
+        if published < since:
+            continue
+        category = (
+            ItemCategory.REPORTING_CONTROLS
+            if "4.02" in item_codes
+            else ItemCategory.PUBLIC_COMPANY_AUDIT
+        )
+        labels = ", ".join(f"Item {code}" for code in item_codes)
+        items.append(
+            ContentItem(
+                source="SEC 8-K Accounting Filings",
+                category=category,
+                title=f"{title} — {labels}",
+                url=url,
+                summary=summary[:4_000],
+                published_at=published,
+                metadata={
+                    "feed_url": SEC_CURRENT_8K_ATOM,
+                    "item_codes": item_codes,
+                    "region": "United States",
+                },
+            )
+        )
+    return _unique_by_url(items)
+
+
+def _sec_direct_document_url(url: str) -> str:
+    """Convert an SEC inline-XBRL viewer URL to the underlying public filing."""
+    if "?doc=" not in url:
+        return url
+    document_path = unquote(url.split("?doc=", 1)[1].split("&", 1)[0])
+    return urljoin("https://www.sec.gov", document_path)
+
+
+def extract_sec_8k_primary_url(index_html: str, index_url: str) -> str:
+    """Find the primary 8-K document link on a filing index page."""
+    soup = BeautifulSoup(index_html, "html.parser")
+    for row in soup.select("table tr"):
+        cells = row.find_all("td")
+        if len(cells) < 4:
+            continue
+        document_type = _clean_text(cells[3].get_text(" "))
+        anchor = row.find("a", href=True)
+        if anchor is not None and document_type.casefold() == "8-k":
+            return _sec_direct_document_url(urljoin(index_url, anchor["href"]))
+    return ""
+
+
+def extract_sec_8k_accounting_sections(
+    html: str,
+    item_codes: Iterable[str],
+    max_characters: int = MAX_ARTICLE_CHARS,
+) -> str:
+    """Extract the substantive Item 4.01/4.02 sections, skipping TOC copies."""
+    text = _clean_text(BeautifulSoup(html, "html.parser").get_text(" "))
+    all_items = list(re.finditer(r"\bItem\s+\d+\.\d+\b", text, flags=re.IGNORECASE))
+    sections: list[str] = []
+    for item_code in item_codes:
+        target = re.compile(rf"\bItem\s+{re.escape(item_code)}\b", re.IGNORECASE)
+        candidates: list[str] = []
+        for match in target.finditer(text):
+            end = len(text)
+            for next_item in all_items:
+                if next_item.start() > match.start() + len(match.group(0)):
+                    end = next_item.start()
+                    break
+            candidate = text[match.start():end].strip()
+            if candidate:
+                candidates.append(candidate)
+        if candidates:
+            # Filing tables of contents often repeat the item heading; the
+            # longest occurrence is the actual disclosure section.
+            sections.append(max(candidates, key=len))
+    return "\n\n".join(dict.fromkeys(sections))[:max_characters]
+
+
+class SEC8KAccountingSource(Source):
+    name = "SEC 8-K Accounting Filings"
+
+    def __init__(self, user_agent: str, feed_url: str = SEC_CURRENT_8K_ATOM) -> None:
+        self.user_agent = user_agent
+        self.feed_url = feed_url
+
+    async def fetch(self, since: datetime) -> list[ContentItem]:
+        headers = {
+            "User-Agent": self.user_agent,
+            "Accept-Encoding": "gzip, deflate",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=25, follow_redirects=True) as client:
+                feed_response = await client.get(self.feed_url, headers=headers)
+                feed_response.raise_for_status()
+                items = parse_sec_8k_feed(feed_response.content, since)
+                semaphore = asyncio.Semaphore(ARTICLE_READER_CONCURRENCY)
+
+                async def add_filing_text(item: ContentItem) -> None:
+                    try:
+                        async with semaphore:
+                            index_response = await client.get(item.url, headers=headers)
+                            index_response.raise_for_status()
+                            primary_url = extract_sec_8k_primary_url(
+                                index_response.text,
+                                str(index_response.url),
+                            )
+                            if not primary_url:
+                                item.metadata["article_read_status"] = "primary_document_not_found"
+                                return
+                            filing_response = await client.get(primary_url, headers=headers)
+                            filing_response.raise_for_status()
+                        article_text = extract_sec_8k_accounting_sections(
+                            filing_response.text,
+                            item.metadata.get("item_codes", ()),
+                        )
+                        item.url = primary_url
+                        if len(article_text) >= MIN_ARTICLE_CHARS:
+                            item.summary = article_text[:8_000]
+                            item.article_text = article_text
+                            item.metadata["article_read_status"] = "provided_by_source"
+                        else:
+                            item.metadata["article_read_status"] = (
+                                f"insufficient_source_text_{len(article_text)}_chars"
+                            )
+                    except httpx.HTTPError as exc:
+                        item.metadata["article_read_status"] = (
+                            f"unavailable:{type(exc).__name__}"
+                        )
+
+                await asyncio.gather(*(add_filing_text(item) for item in items))
+                return items
+        except (httpx.HTTPError, ValueError) as exc:
+            raise SourceFetchError(f"SEC current 8-K fetch failed: {exc}") from exc
+
+
+_TDNET_FRAUD_TERMS = ("不正会計", "不適切な会計", "会計不正", "粉飾")
+_TDNET_AUDIT_TERMS = ("会計監査人", "監査法人", "監査意見")
+_TDNET_REPORTING_TERMS = (
+    "内部統制報告書",
+    "財務報告に係る内部統制",
+    "訂正有価証券報告書",
+    "決算短信の訂正",
+    "過年度決算",
+    "会計処理",
+)
+
+
+def _classify_tdnet_title(title: str) -> ItemCategory | None:
+    if "監査役" in title and not any(term in title for term in _TDNET_AUDIT_TERMS):
+        return None
+    if any(term in title for term in ("再任", "選任")) and not any(
+        term in title for term in ("変更", "退任", "辞任", "異動")
+    ):
+        return None
+    if any(term in title for term in _TDNET_FRAUD_TERMS):
+        return ItemCategory.FRAUD_ENFORCEMENT
+    if any(term in title for term in _TDNET_AUDIT_TERMS):
+        return ItemCategory.PUBLIC_COMPANY_AUDIT
+    if any(term in title for term in _TDNET_REPORTING_TERMS):
+        return ItemCategory.REPORTING_CONTROLS
+    if any(term in title for term in ("第三者委員会", "特別調査委員会")) and any(
+        term in title for term in ("会計", "財務", "決算", "売上")
+    ):
+        return ItemCategory.FRAUD_ENFORCEMENT
+    return None
+
+
+def parse_tdnet_listing(
+    html: str,
+    page_url: str,
+    listing_day: date,
+    since: datetime,
+) -> list[ContentItem]:
+    """Parse precise audit/reporting disclosures from a TDnet daily page."""
+    soup = BeautifulSoup(html, "html.parser")
+    local_zone = ZoneInfo("Asia/Tokyo")
+    items: list[ContentItem] = []
+    for row in soup.select("tr"):
+        time_cell = row.select_one(".kjTime")
+        name_cell = row.select_one(".kjName")
+        code_cell = row.select_one(".kjCode")
+        title_cell = row.select_one(".kjTitle")
+        anchor = title_cell.find("a", href=True) if title_cell is not None else None
+        if time_cell is None or title_cell is None or anchor is None:
+            continue
+        title = _clean_text(title_cell.get_text(" "))
+        category = _classify_tdnet_title(title)
+        time_match = re.search(r"(\d{1,2}):(\d{2})", time_cell.get_text(" "))
+        if category is None or time_match is None:
+            continue
+        published = datetime(
+            listing_day.year,
+            listing_day.month,
+            listing_day.day,
+            int(time_match.group(1)),
+            int(time_match.group(2)),
+            tzinfo=local_zone,
+        ).astimezone(timezone.utc)
+        if published < since:
+            continue
+        company = _clean_text(name_cell.get_text(" ")) if name_cell is not None else ""
+        code = _clean_text(code_cell.get_text(" ")) if code_cell is not None else ""
+        items.append(
+            ContentItem(
+                source="Japan TDnet Audit & Reporting",
+                category=category,
+                title=f"{company}：{title}" if company else title,
+                url=urljoin(page_url, anchor["href"]),
+                summary=f"TDnet 上市公司披露：{company}（{code}）—{title}",
+                published_at=published,
+                metadata={
+                    "listing_url": page_url,
+                    "company_code": code,
+                    "region": "Japan",
+                },
+            )
+        )
+    return _unique_by_url(items)
+
+
+class TDnetAccountingSource(Source):
+    name = "Japan TDnet Audit & Reporting"
+
+    async def fetch(self, since: datetime) -> list[ContentItem]:
+        local_since = since.astimezone(ZoneInfo("Asia/Tokyo")).date()
+        local_today = datetime.now(ZoneInfo("Asia/Tokyo")).date()
+        days = [
+            local_since + timedelta(days=offset)
+            for offset in range(min(8, (local_today - local_since).days + 1))
+        ]
+        headers = {"User-Agent": "audit-regulatory-intel-bot/2.0"}
+        items: list[ContentItem] = []
+        try:
+            async with httpx.AsyncClient(timeout=25, follow_redirects=True) as client:
+                for listing_day in days:
+                    day_text = listing_day.strftime("%Y%m%d")
+                    first_url = TDNET_DAILY_LIST_URL.format(date=day_text)
+                    first_response = await client.get(first_url, headers=headers)
+                    if first_response.status_code == 404:
+                        continue
+                    first_response.raise_for_status()
+                    page_numbers = {
+                        int(number)
+                        for number in re.findall(
+                            rf"I_list_(\d{{3}})_{day_text}\.html",
+                            first_response.text,
+                        )
+                    } | {1}
+                    pages = [(first_url, first_response.text)]
+                    for page_number in sorted(page_numbers - {1}):
+                        page_url = first_url.replace(
+                            "I_list_001_",
+                            f"I_list_{page_number:03d}_",
+                        )
+                        response = await client.get(page_url, headers=headers)
+                        response.raise_for_status()
+                        pages.append((page_url, response.text))
+                    for page_url, html in pages:
+                        items.extend(
+                            parse_tdnet_listing(html, page_url, listing_day, since)
+                        )
+        except httpx.HTTPError as exc:
+            raise SourceFetchError(f"TDnet listing fetch failed: {exc}") from exc
+        return sorted(
+            _unique_by_url(items),
+            key=lambda item: (item.category == ItemCategory.FRAUD_ENFORCEMENT, item.published_at),
+            reverse=True,
+        )[:8]
+
+
+_HKEX_QUERY_TERMS = (
+    "change of auditor",
+    "qualified opinion",
+    "disclaimer of opinion",
+    "modified opinion",
+    "internal control",
+    "financial irregularities",
+    "restatement",
+    "delay in publication of results",
+)
+
+
+def _classify_hkex_title(title: str) -> ItemCategory | None:
+    normalized = title.casefold()
+    if any(
+        term in normalized
+        for term in ("re-appointment of auditor", "audit committee", "unaudited")
+    ):
+        return None
+    if any(
+        term in normalized
+        for term in (
+            "financial irregularit",
+            "accounting irregularit",
+            "independent investigation",
+            "forensic investigation",
+        )
+    ):
+        return ItemCategory.FRAUD_ENFORCEMENT
+    if any(
+        term in normalized
+        for term in (
+            "change of auditor",
+            "resignation of auditor",
+            "removal of auditor",
+            "auditor resignation",
+            "qualified opinion",
+            "disclaimer of opinion",
+            "adverse opinion",
+            "modified opinion",
+            "audit issue",
+        )
+    ):
+        return ItemCategory.PUBLIC_COMPANY_AUDIT
+    if any(
+        term in normalized
+        for term in (
+            "internal control",
+            "material weakness",
+            "restatement",
+            "delay in publication of results",
+            "delay in results",
+        )
+    ):
+        return ItemCategory.REPORTING_CONTROLS
+    return None
+
+
+def parse_hkex_records(payload: dict | list, since: datetime) -> list[ContentItem]:
+    """Convert HKEX title-search results and reject routine audit boilerplate."""
+    records: object = payload.get("result", []) if isinstance(payload, dict) else payload
+    if isinstance(records, str):
+        try:
+            records = json.loads(records)
+        except ValueError:
+            records = []
+    if not isinstance(records, list):
+        return []
+
+    items: list[ContentItem] = []
+    local_zone = ZoneInfo("Asia/Hong_Kong")
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        title = _clean_text(str(record.get("TITLE") or record.get("LONG_TEXT") or ""))
+        category = _classify_hkex_title(title)
+        raw_url = str(record.get("FILE_LINK", "")).strip()
+        try:
+            published = datetime.strptime(
+                str(record.get("DATE_TIME", "")).strip(),
+                "%d/%m/%Y %H:%M",
+            ).replace(tzinfo=local_zone).astimezone(timezone.utc)
+        except ValueError:
+            continue
+        if category is None or not raw_url or published < since:
+            continue
+        company = _clean_text(str(record.get("STOCK_NAME", "")))
+        code = _clean_text(str(record.get("STOCK_CODE", "")))
+        items.append(
+            ContentItem(
+                source="HKEX Audit & Reporting",
+                category=category,
+                title=f"{company}：{title}" if company else title,
+                url=urljoin("https://www1.hkexnews.hk", raw_url),
+                summary=f"香港上市公司公告：{company}（{code}）—{title}",
+                published_at=published,
+                metadata={
+                    "company_code": code,
+                    "api_url": HKEX_TITLE_SEARCH_URL,
+                    "region": "Hong Kong",
+                },
+            )
+        )
+    return _unique_by_url(items)
+
+
+class HKEXAccountingSource(Source):
+    name = "HKEX Audit & Reporting"
+
+    async def fetch(self, since: datetime) -> list[ContentItem]:
+        local_since = since.astimezone(ZoneInfo("Asia/Hong_Kong")).strftime("%Y%m%d")
+        local_today = datetime.now(ZoneInfo("Asia/Hong_Kong")).strftime("%Y%m%d")
+        common_params = {
+            "sortDir": "0",
+            "sortByOptions": "DateTime",
+            "category": "0",
+            "market": "SEHK",
+            "stockId": "-1",
+            "documentType": "-1",
+            "from": local_since,
+            "to": local_today,
+            "searchType": "0",
+            "t1code": "10000",
+            "t2Gcode": "-2",
+            "t2code": "-2",
+            "lang": "EN",
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0 audit-regulatory-intel-bot/2.0",
+            "Referer": "https://www1.hkexnews.hk/search/titlesearch.xhtml",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=25, follow_redirects=True) as client:
+                responses = await asyncio.gather(
+                    *(
+                        client.get(
+                            HKEX_TITLE_SEARCH_URL,
+                            params={**common_params, "title": term},
+                            headers=headers,
+                        )
+                        for term in _HKEX_QUERY_TERMS
+                    )
+                )
+                payloads: list[dict | list] = []
+                for response in responses:
+                    response.raise_for_status()
+                    payloads.append(response.json())
+        except (httpx.HTTPError, ValueError) as exc:
+            raise SourceFetchError(f"HKEX title search failed: {exc}") from exc
+        items = [
+            item
+            for payload in payloads
+            for item in parse_hkex_records(payload, since)
+        ]
+        return sorted(
+            _unique_by_url(items),
+            key=lambda item: (item.score, item.published_at),
+            reverse=True,
+        )[:8]
+
+
+_REIWA_DATE_PATTERN = re.compile(
+    r"令和\s*(?P<year>元|\d+)\s*年\s*(?P<month>\d+)\s*月\s*(?P<day>\d+)\s*日"
+)
+_CPAAOB_TITLE_TERMS = (
+    "勧告",
+    "検査結果",
+    "モニタリングレポート",
+    "基本方針",
+    "基本計画",
+    "監査事務所検査結果事例集",
+)
+
+
+def parse_cpaaob_listing(
+    html: str,
+    page_url: str,
+    since: datetime,
+) -> list[ContentItem]:
+    """Parse Japanese audit-inspection recommendations and monitoring reports."""
+    soup = BeautifulSoup(html, "html.parser")
+    now = datetime.now(timezone.utc)
+    items: list[ContentItem] = []
+    for anchor in soup.select("a[href]"):
+        title = _clean_text(anchor.get_text(" "))
+        if not title or not any(term in title for term in _CPAAOB_TITLE_TERMS):
+            continue
+        context = title
+        date_match = _REIWA_DATE_PATTERN.search(context)
+        if date_match is None:
+            for parent in anchor.parents:
+                if getattr(parent, "name", None) not in {"li", "td", "tr", "div", "p"}:
+                    continue
+                context = _clean_text(parent.get_text(" "))
+                date_match = _REIWA_DATE_PATTERN.search(context)
+                if date_match is not None:
+                    break
+        if date_match is None:
+            continue
+        era_year = 1 if date_match.group("year") == "元" else int(date_match.group("year"))
+        published = _source_day_timestamp(
+            2018 + era_year,
+            int(date_match.group("month")),
+            int(date_match.group("day")),
+            "Asia/Tokyo",
+            now,
+        )
+        if published < since:
+            continue
+        items.append(
+            ContentItem(
+                source="Japan CPAAOB Audit Oversight",
+                category=ItemCategory.PUBLIC_COMPANY_AUDIT,
+                title=title,
+                url=urljoin(page_url, anchor["href"]),
+                summary=context[:2_000],
+                published_at=published,
+                metadata={
+                    "listing_url": page_url,
+                    "date_precision": "day",
+                    "region": "Japan",
+                },
+            )
+        )
+    return _unique_by_url(items)
+
+
+class CPAAOBAuditSource(Source):
+    name = "Japan CPAAOB Audit Oversight"
+
+    async def fetch(self, since: datetime) -> list[ContentItem]:
+        urls = (
+            CPAAOB_INSPECTION_RECOMMENDATIONS_URL,
+            CPAAOB_MONITORING_REPORTS_URL,
+        )
+        try:
+            async with httpx.AsyncClient(timeout=25, follow_redirects=True) as client:
+                responses = await asyncio.gather(
+                    *(
+                        client.get(
+                            url,
+                            headers={"User-Agent": "audit-regulatory-intel-bot/2.0"},
+                        )
+                        for url in urls
+                    )
+                )
+                for response in responses:
+                    response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise SourceFetchError(f"Japan CPAAOB fetch failed: {exc}") from exc
+        items = [
+            item
+            for response, url in zip(responses, urls, strict=True)
+            for item in parse_cpaaob_listing(response.text, url, since)
+        ]
+        return _unique_by_url(items)
 
 
 class PublicArticleReader:
@@ -1275,6 +1825,7 @@ def build_sources(settings: Settings) -> list[Source]:
         RSSSource("SEC Press Releases", SEC_PRESS_RSS),
         RSSSource("SEC Litigation Releases", SEC_LITIGATION_RSS),
         RSSSource("SEC Administrative Proceedings", SEC_ADMIN_PROCEEDINGS_RSS),
+        SEC8KAccountingSource(settings.sec_user_agent),
         PCAOBNewsSource(),
         DatedListingSource(
             "UK FRC Audit & Reporting",
@@ -1295,6 +1846,9 @@ def build_sources(settings: Settings) -> list[Source]:
         CNInfoAnnouncementSource(),
         MinistryOfFinanceSanctionsSource(),
         ASICJSONSource(),
+        TDnetAccountingSource(),
+        CPAAOBAuditSource(),
+        HKEXAccountingSource(),
         DatedListingSource(
             "AFRC Hong Kong",
             AFRC_PRESS_RELEASES_URL,

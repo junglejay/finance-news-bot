@@ -3,7 +3,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from app.models import ContentItem, ItemCategory
-from app.rules import MAX_CANDIDATES, MAX_ITEMS_PER_SOURCE
+from app.rules import (
+    MAINLAND_CHINA_SOURCES,
+    MAX_CANDIDATES,
+    MAX_ITEMS_PER_SOURCE,
+    MAX_MAINLAND_CHINA_CANDIDATES,
+)
 from app.scoring import score_item, select_candidates
 
 
@@ -321,3 +326,55 @@ def test_candidate_selection_caps_each_source_and_total() -> None:
     assert len(candidates) == MAX_CANDIDATES
     for source in {item.source for item in candidates}:
         assert sum(item.source == source for item in candidates) <= MAX_ITEMS_PER_SOURCE
+
+
+def test_candidate_selection_caps_mainland_news_and_keeps_foreign_items() -> None:
+    mainland_items = [
+        score_item(
+            _item(
+                f"会计师事务所关于年报问询函的专项说明 {index}",
+                "上市公司年度报告审计涉及收入确认和审计证据。",
+                source="巨潮资讯年报问询与审计回复",
+                url=f"https://static.cninfo.com.cn/{index}.pdf",
+                category=ItemCategory.PUBLIC_COMPANY_AUDIT,
+            ),
+            now=NOW,
+        )
+        for index in range(4)
+    ]
+    foreign_items = [
+        score_item(
+            _item(
+                f"Foreign issuer auditor filing {index}",
+                "A public company auditor reported an audit opinion and material weakness.",
+                source="SEC 8-K Accounting Filings",
+                url=f"https://www.sec.gov/Archives/{index}.htm",
+                category=ItemCategory.PUBLIC_COMPANY_AUDIT,
+            ),
+            now=NOW,
+        )
+        for index in range(3)
+    ]
+
+    candidates = select_candidates([*mainland_items, *foreign_items])
+
+    assert sum(item.source in MAINLAND_CHINA_SOURCES for item in candidates) == (
+        MAX_MAINLAND_CHINA_CANDIDATES
+    )
+    assert sum(item.source not in MAINLAND_CHINA_SOURCES for item in candidates) == 3
+
+
+def test_source_filtered_japanese_disclosure_keeps_assigned_category() -> None:
+    item = score_item(
+        _item(
+            "Example株式会社：会計監査人の異動に関するお知らせ",
+            "TDnet 上市会社披露。",
+            source="Japan TDnet Audit & Reporting",
+            url="https://www.release.tdnet.info/example.pdf",
+            category=ItemCategory.PUBLIC_COMPANY_AUDIT,
+        ),
+        now=NOW,
+    )
+
+    assert item.category == ItemCategory.PUBLIC_COMPANY_AUDIT
+    assert item.score >= 55

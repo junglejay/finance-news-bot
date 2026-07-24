@@ -20,10 +20,13 @@ from .rules import (
     DEDICATED_SOURCE_BONUS,
     ENFORCEMENT_ACTION_TERMS,
     FRAUD_TERMS,
+    FOCUSED_DISCLOSURE_SOURCE_PREFIXES,
     GENERIC_REGULATORY_EVENT_TERMS,
     LOW_VALUE_PROCEDURAL_TERMS,
+    MAINLAND_CHINA_SOURCES,
     MAX_CANDIDATES,
     MAX_ITEMS_PER_SOURCE,
+    MAX_MAINLAND_CHINA_CANDIDATES,
     MIN_RELEVANCE_SCORE,
     NON_PUBLIC_COMPANY_AUDIT_TERMS,
     OFF_TOPIC_PENALTY,
@@ -102,6 +105,10 @@ def score_item(item: ContentItem, now: datetime | None = None) -> ContentItem:
         item.source,
         ("巨潮资讯年报问询与审计回复",),
     )
+    focused_disclosure = _source_starts_with(
+        item.source,
+        FOCUSED_DISCLOSURE_SOURCE_PREFIXES,
+    )
 
     reasons: list[str] = []
     score = 0.0
@@ -119,6 +126,15 @@ def score_item(item: ContentItem, now: datetime | None = None) -> ContentItem:
         # A company/auditor reply may quote an exchange question containing
         # fraud or investigation language. Preserve the document's actual type
         # instead of presenting the quoted premise as an enforcement finding.
+        item.category = item.category
+    elif focused_disclosure and item.category in {
+        ItemCategory.FRAUD_ENFORCEMENT,
+        ItemCategory.PUBLIC_COMPANY_AUDIT,
+        ItemCategory.REPORTING_CONTROLS,
+    }:
+        # SEC item codes and exchange-title filters are narrower than the
+        # generic multilingual dictionaries, so retain their source-assigned
+        # category after the source-specific gate has passed.
         item.category = item.category
     elif dedicated_fraud and item.category == ItemCategory.FRAUD_ENFORCEMENT:
         item.category = ItemCategory.FRAUD_ENFORCEMENT
@@ -197,7 +213,10 @@ def score_item(item: ContentItem, now: datetime | None = None) -> ContentItem:
     return item
 
 
-def select_candidates(items: list[ContentItem]) -> list[ContentItem]:
+def select_candidates(
+    items: list[ContentItem],
+    mainland_limit: int = MAX_MAINLAND_CHINA_CANDIDATES,
+) -> list[ContentItem]:
     """Select a focused, category-balanced pool without unrelated backfilling."""
     ranked = sorted(items, key=lambda item: (item.score, item.published_at), reverse=True)
     eligible = [
@@ -209,17 +228,26 @@ def select_candidates(items: list[ContentItem]) -> list[ContentItem]:
     selected: list[ContentItem] = []
     selected_ids: set[str] = set()
     source_counts: Counter[str] = Counter()
+    mainland_count = 0
 
     def add(item: ContentItem) -> None:
+        nonlocal mainland_count
         if len(selected) >= MAX_CANDIDATES:
             return
         if item.external_id in selected_ids:
             return
         if source_counts[item.source] >= MAX_ITEMS_PER_SOURCE:
             return
+        if (
+            item.source in MAINLAND_CHINA_SOURCES
+            and mainland_count >= max(0, mainland_limit)
+        ):
+            return
         selected.append(item)
         selected_ids.add(item.external_id)
         source_counts[item.source] += 1
+        if item.source in MAINLAND_CHINA_SOURCES:
+            mainland_count += 1
 
     categorized = {
         category: [item for item in eligible if item.category == category]

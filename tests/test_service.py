@@ -188,3 +188,51 @@ async def test_service_skips_urls_delivered_by_an_earlier_run(settings, tmp_path
     assert second_result.status == "no_update"
     assert second_result.history_skipped_count == 1
     assert second_notifier.no_updates == 1
+
+
+@pytest.mark.asyncio
+async def test_service_enforces_mainland_quota_across_same_day_reruns(
+    settings,
+    tmp_path,
+) -> None:
+    timestamp = datetime(2026, 7, 24, 0, 0, tzinfo=timezone.utc)
+    settings = replace(
+        settings,
+        delivery_history_file=str(tmp_path / "delivered.json"),
+    )
+    items = [
+        ContentItem(
+            source="中国证监会行政处罚",
+            title=f"Listed company financial statement fraud case {index}",
+            url=f"https://example.test/mainland-case-{index}",
+            summary="The issuer allegedly used fictitious revenue in its annual report.",
+            published_at=timestamp,
+        )
+        for index in range(2)
+    ]
+    now = datetime(2026, 7, 24, 1, 0, tzinfo=timezone.utc)
+
+    first_notifier = FixtureNotifier()
+    first = BriefService(
+        settings,
+        [StaticSource(items)],
+        FixtureGenerator(),
+        first_notifier,
+    )
+    first_result = await first.run_once(now)
+
+    second_notifier = FixtureNotifier()
+    second = BriefService(
+        settings,
+        [StaticSource(items)],
+        FixtureGenerator(),
+        second_notifier,
+    )
+    second_result = await second.run_once(now)
+
+    assert first_result.status == "success"
+    assert first_result.candidate_count == 1
+    assert second_result.status == "no_update"
+    assert second_result.history_skipped_count == 1
+    assert second_result.candidate_count == 0
+    assert second_notifier.no_updates == 1

@@ -87,6 +87,16 @@ python -m app.cli run-once
 
 最后一条命令会调用真实来源与 AI 网关；设置 `DINGTALK_WEBHOOK` 时发送钉钉消息，未设置时直接打印完整深度阅读。测试本身不会调用外部服务。
 
+如果想先在不推送钉钉的情况下查看每一步（抓取 / 筛选 / 读正文 / AI 生成）的中间结果，可以用模拟命令：
+
+```bash
+python -m app.cli simulate              # 生产窗口（24h，周一 72h）
+python -m app.cli simulate --hours 168  # 指定抓取窗口
+python -m app.cli simulate --no-ai      # 跳过 AI，只看抓取/筛选/读正文
+```
+
+`simulate` 不会真正调用钉钉 Webhook，只打印“将会推送”的报告内容；需要真实推送仍用 `run-once`。
+
 ## 失败处理
 
 - 每个订阅源独立超时并重试三次；单一来源失败不影响其余来源。

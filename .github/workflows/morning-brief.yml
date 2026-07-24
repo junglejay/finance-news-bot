@@ -47,4 +47,4 @@ jobs:
         run: python -m pip install --disable-pip-version-check -r requirements.txt
 
       - name: Collect, read, analyse, and deliver the report
-        run: python -m app.cli run-once
+        run: python -m app.cli simulate_run

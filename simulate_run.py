@@ -5,7 +5,7 @@
 需要真实推送请用 `python -m app.cli run-once`。
 
 用法:
-    python simulate_run.py              # 生产窗口（24h，周一 72h）
+    python simulate_run.py              # 默认生产窗口（24h）
     python simulate_run.py --hours 168  # 指定抓取窗口
     python simulate_run.py --no-ai      # 跳过 AI，只看抓取/筛选/读正文
 """
@@ -31,7 +31,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from app.ai import OpenAICompatibleBriefGenerator
 from app.config import Settings
 from app.models import ContentItem
-from app.rules import DEFAULT_WINDOW_HOURS, MAX_AI_INPUT_CANDIDATES, WEEKEND_WINDOW_HOURS
+from app.rules import (
+    DEFAULT_WINDOW_HOURS,
+    MAX_AI_INPUT_CANDIDATES,
+    MAX_CANDIDATES,
+    WEEKEND_WINDOW_HOURS,
+)
 from app.scoring import score_item, select_candidates
 from app.service import BriefService
 from app.sources import PublicArticleReader, Source, build_sources
@@ -61,6 +66,28 @@ def _format_error(exc: Exception) -> str:
 
 def _bar(char: str = "=") -> str:
     return char * 78
+
+
+def _table_cell(value: object) -> str:
+    """Keep terminal Markdown tables on one line and escape cell separators."""
+    return " ".join(str(value).split()).replace("|", r"\|")
+
+
+def _print_table(headers: tuple[str, ...], rows: list[tuple[object, ...]]) -> None:
+    """Print a dependency-free Markdown table that remains copyable from CI logs."""
+    if not rows:
+        print("（无）")
+        return
+    print("| " + " | ".join(_table_cell(header) for header in headers) + " |")
+    print("| " + " | ".join("---:" if index == 0 else "---" for index in range(len(headers))) + " |")
+    for row in rows:
+        print("| " + " | ".join(_table_cell(cell) for cell in row) + " |")
+
+
+def _published_local(item: ContentItem, timezone_name: str) -> str:
+    if item.metadata.get("date_precision") == "day":
+        return item.published_at.strftime("%m-%d") + "（仅日期）"
+    return item.published_at.astimezone(ZoneInfo(timezone_name)).strftime("%m-%d %H:%M")
 
 
 async def _fetch_source(source: Source, since: datetime) -> tuple[str, list[ContentItem], str | None]:
@@ -102,8 +129,7 @@ async def amain(args: argparse.Namespace) -> int:
         if error is not None:
             continue
         for item in items:
-            scored = score_item(item, now)
-            collected.setdefault(scored.checksum, scored)
+            collected.setdefault(item.checksum, item)
     all_items = list(collected.values())
 
     print(f"\n【1】抓取原始新闻   源: {len(sources)} 个, 去重后 {len(all_items)} 条\n")
@@ -113,30 +139,67 @@ async def amain(args: argparse.Namespace) -> int:
         else:
             print(f"  [OK]   {name}: {count} 条")
 
+    # Official feeds often contain only terse headlines. Read allowed public
+    # pages first so the rule engine can classify against actual body text.
+    reader = PublicArticleReader(settings.extra_article_domains)
+    all_items = await reader.enrich(all_items)
+    all_items = [score_item(item, now) for item in all_items]
+
     # --- 2. 打分 + 选中候选 ---
     candidates = select_candidates(all_items)
     candidate_ids = {item.external_id for item in candidates}
     ranked = sorted(all_items, key=lambda i: (i.score, i.published_at), reverse=True)
 
     print(f"\n{_bar('-')}")
-    print(f"【2】打分并筛选候选   全部 {len(all_items)} 条 -> 选中 {len(candidates)} 条（上限 16）")
+    print(
+        f"【2】打分并筛选候选   全部 {len(all_items)} 条 -> "
+        f"选中 {len(candidates)} 条（上限 {MAX_CANDIDATES}，不以无关新闻补足）"
+    )
     print(_bar("-"))
-    for idx, item in enumerate(ranked, 1):
-        mark = "✔ 选中" if item.external_id in candidate_ids else "  落选"
-        print(f"  {mark} | {item.score:6.1f} | {str(item.category):18s} | {item.source[:24]:24s} | {item.title[:70]}")
+    print("读取到的新闻（已去重并完成规则评分）：")
+    _print_table(
+        ("#", "发布时间", "来源", "分类", "分数", "规则结果", "标题", "链接"),
+        [
+            (
+                idx,
+                _published_local(item, settings.timezone),
+                item.source,
+                str(item.category),
+                f"{item.score:.1f}",
+                "入选" if item.external_id in candidate_ids else "落选",
+                item.title,
+                item.url,
+            )
+            for idx, item in enumerate(ranked, 1)
+        ],
+    )
 
     # --- 3. 读正文 ---
-    reader = PublicArticleReader(settings.extra_article_domains)
-    candidates = await reader.enrich(candidates)
     readable = [c for c in candidates if c.article_text]
 
     print(f"\n{_bar('-')}")
     print(f"【3】读取公开正文   选中 {len(candidates)} 条 -> 读到正文 {len(readable)} 条")
     print(_bar("-"))
-    for item in candidates:
-        status = "read" if item.article_text else item.metadata.get("article_read_status", "unknown")
-        flag = "✅" if item.article_text else "⚠️ "
-        print(f"  {flag} {item.score:6.1f} | {str(item.category):18s} | {status:28s} | {item.source[:20]:20s} | {item.title[:50]}")
+    print("规则最终入选新闻（正文成功者才会进入 AI）：")
+    _print_table(
+        ("#", "发布时间", "来源", "分类", "分数", "正文状态", "进入AI", "标题", "链接"),
+        [
+            (
+                idx,
+                _published_local(item, settings.timezone),
+                item.source,
+                str(item.category),
+                f"{item.score:.1f}",
+                "读取成功"
+                if item.article_text
+                else item.metadata.get("article_read_status", "unknown"),
+                "是" if item.article_text else "否",
+                item.title,
+                item.url,
+            )
+            for idx, item in enumerate(candidates, 1)
+        ],
+    )
 
     if args.no_ai:
         print("\n已指定 --no-ai，跳过 AI 生成与推送模拟。")
@@ -147,8 +210,21 @@ async def amain(args: argparse.Namespace) -> int:
     print(f"\n{_bar('-')}")
     print(f"【4】AI 生成   输入候选 {len(ai_input)} 条（有正文，按分数取前 {MAX_AI_INPUT_CANDIDATES}）")
     print(_bar("-"))
-    for item in ai_input:
-        print(f"  {item.score:6.1f} | {str(item.category):18s} | {item.source[:24]:24s} | {item.title[:70]}")
+    _print_table(
+        ("#", "发布时间", "来源", "分类", "分数", "标题", "链接"),
+        [
+            (
+                idx,
+                _published_local(item, settings.timezone),
+                item.source,
+                str(item.category),
+                f"{item.score:.1f}",
+                item.title,
+                item.url,
+            )
+            for idx, item in enumerate(ai_input, 1)
+        ],
+    )
 
     print("\n调用 AI 网关生成报告中...")
     generator = OpenAICompatibleBriefGenerator(settings)
@@ -163,6 +239,20 @@ async def amain(args: argparse.Namespace) -> int:
     print(f"【5】最终推送到钉钉的新闻   共 {len(report.analyses)} 篇（每篇一条钉钉消息）")
     print(f"    模拟模式：未调用钉钉 Webhook。如需真发请运行: python -m app.cli run-once")
     print(_bar())
+    print("AI 最终入选新闻：")
+    _print_table(
+        ("#", "发布日期", "来源", "标题", "链接"),
+        [
+            (
+                idx,
+                analysis.published_at.date().isoformat(),
+                analysis.source,
+                analysis.title,
+                analysis.url,
+            )
+            for idx, analysis in enumerate(report.analyses, 1)
+        ],
+    )
     for idx, analysis in enumerate(report.analyses, 1):
         print(f"\n---------- 第 {idx}/{len(report.analyses)} 篇 ----------")
         print(f"标题: {analysis.title}")

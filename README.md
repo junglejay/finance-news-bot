@@ -1,80 +1,125 @@
-# 商品与风控情报深度阅读机器人
+# 财务造假、监管与上市公司审计深度阅读机器人
 
-这是一个由 GitHub Actions 驱动的无状态中文研究机器人。它每天北京时间 07:30 运行，收集能源、金属、农产品、宏观市场驱动、财务舞弊和内部控制相关的一手公告与权威公开订阅源；读取可公开访问的全文后，使用 OpenAI 兼容的 AI 网关逐篇生成中文深度阅读，再投递到钉钉机器人。
+这是一个由 GitHub Actions 驱动的中文研究机器人。它每天北京时间 07:30 运行，专注以下四类材料：
 
-每次任务只在 GitHub 托管运行器的内存中处理数据：不部署服务、不创建 SQLite 文件、不保存原文、报告或投递记录。运行时会在内存内按 URL/内容哈希去重，并抓取最近 24 小时的信息（周一覆盖最近 72 小时）。
+1. 财务造假与证券监管执法；
+2. 上市公司审计、审计机构处罚与检查发现；
+3. 财务报告、内部控制和非标准审计意见；
+4. 与上述主题直接相关的专业研究。
 
-## 输出方式
+系统优先采集监管机构和审计准则制定机构的一手公开材料，读取可公开访问的正文，经确定性规则筛选后，再使用 OpenAI 兼容的 AI 网关生成逐篇中文深度解读并推送到钉钉。
 
-输出不再是“几条判断 + 卡片式简报”。每次成功运行会选择 1 至 4 篇公开可读且相关性最高的文章，逐篇输出：
+每次运行不保存原文或 AI 报告。抓取窗口默认为最近 24 小时，并通过 GitHub
+Actions 缓存仅保存“已成功推送的 URL 和时间”，避免手动重跑或来源时间重叠导致重复推送。
+URL 历史默认保留 14 天。
 
-- 文章的核心命题；
-- 可追溯的事实链；
-- 多段中文深度解读；
-- 商品、期货或公司风险的条件式传导观察；
-- 反证、局限与下一步核验事项。
+## 与旧版的主要区别
 
-AI 只能使用已收集的标题、摘要和本次临时读取的正文；每一篇分析的来源、日期与原文链接都必须与输入条目一致。正文一律转述，不会大段引用来源内容。
-
-程序会按商品、宏观驱动、财务风险和研究四类建立候选池，分类配额分别为 6、4、4、2，单次最多 16 条。候选不足 12 条时，会优先保留央行、监管机构、能源统计机构等第一方来源；普通来源中没有明确相关性的文章不会被用于强行凑数。
+- 商品、宏观、央行动态、AI 政策和泛资本市场新闻不再是主动分类，也没有候选配额。
+- “处罚”“调查”“fraud”等单个宽泛词不能单独入选；分类要求财务报告、上市公司或审计语境同时成立。
+- SEC、证监会等综合监管源也必须通过主题门槛，内幕交易、操纵市场、加密资产等内容不会因为来源权威而自动入选。
+- 候选池不再强行凑到最低数量；没有高相关材料时发送“暂无高相关更新”，而不是推送无关新闻或故障通知。
+- 单一来源最多进入 4 条候选，避免监管机构集中发布时完全挤占其他地区和主题。
 
 ## 默认信息源
 
-- Forbes 公开 RSS；
-- 美国能源信息署（EIA）`Today in Energy` 与新闻稿 RSS；
-- 美联储新闻稿 RSS；
-- 国际清算银行（BIS）新闻稿与统计发布 RSS；
-- 欧洲中央银行（ECB）新闻、讲话与统计发布 RSS；
-- 美国商品期货交易委员会（CFTC）新闻稿；
-- SEC 会计与审计执法公告、SEC 新闻稿；
+核心一手来源：
+
+- SEC Accounting and Auditing Enforcement Releases（AAER）专门 RSS；
+- SEC Press Releases（严格二次筛选）；
+- SEC Litigation Releases；
+- SEC Administrative Proceedings；
 - PCAOB 新闻稿；
-- 已授权的 Financial Times RSS 或官方邮件通讯（可选）；
-- Google Scholar Alert 邮件（可选）。
+- Thomson Reuters Tax & Accounting 的公开 PCAOB 专题报道，用于补足只发布执法令、未发新闻稿的 PCAOB 案件；
+- 英国 Financial Reporting Council（FRC）完整新闻栏目，经正文筛选审计质量、执法和财报内容；
+- International Auditing and Assurance Standards Board（IAASB）新闻；
+- 中国证监会行政处罚公开接口；
+- 中国证监会要闻公开接口（严格二次筛选）；
+- 巨潮资讯上市公司年报监管问询回复、会计师专项说明、财报更正及非标审计意见；
+- 财政部行政处罚结果；
+- 澳大利亚 ASIC 官方媒体发布公开 JSON；
+- 香港会计及财务汇报局（AFRC）新闻。
 
-Financial Times 与 Google Scholar 链接仅保留已授权订阅提供的标题、摘要和链接；程序不会抓取其受保护正文，也不会尝试绕过付费墙或登录限制。其他来源的正文也只会从来源官网公开页面读取，且仅在本次任务的内存中保留。
+可选补充来源：
 
-BIS 与 ECB 已作为默认来源启用，`bis.org` 和 `ecb.europa.eu` 也已加入公开正文域名白名单，无需再配置 Actions variables。
+- 已授权的 Financial Times RSS 或官方邮件通讯；
+- Google Scholar Alert 邮件（仅保留财务舞弊、审计质量和内控研究）；
+- 通过 `EXTRA_RSS_FEEDS` 明确配置的审计监管机构或专业媒体。
 
-若要加入自己的其他权威公开订阅源，可设置 `EXTRA_RSS_FEEDS`：每行一个 `来源名称|https://rss-url`。若希望这些额外来源也参与“深度阅读”，再在 `EXTRA_ARTICLE_DOMAINS` 中用逗号列出其公开正文域名。只应加入无需登录、没有付费墙且你有权访问的域名。在 GitHub 上建议把这两个值设为仓库的 **Actions variables**，而不是 Secret。
+The Guardian Business、Wall Street Journal US Business、Yahoo Finance 等泛商业
+RSS 不再默认抓取。需要其中某个来源时可以显式加入 `EXTRA_RSS_FEEDS`，但其内容
+仍须通过相同的复合主题门槛。
 
-```text
-EXTRA_RSS_FEEDS=International Energy Agency|https://example.org/news/rss.xml
-EXTRA_ARTICLE_DOMAINS=example.org
-```
+Financial Times 和 Scholar 链接只保留订阅提供的标题、摘要和链接，不抓取受保护正文，也不会绕过付费墙或登录限制。其他正文仅从代码白名单中的公开域名读取。
+
+## 筛选与输出
+
+规则层先将条目映射为以下活动分类：
+
+| 分类 | 进入条件示例 | 候选配额 |
+| --- | --- | ---: |
+| `fraud_enforcement` | 造假手法 + 财报/上市公司/审计语境，或 SEC AAER 专门栏目 | 5 |
+| `public_company_audit` | 审计主题 + 审计质量/上市公司/财报语境，或审计监管专门栏目 | 5 |
+| `reporting_controls` | 财务报告/内控问题 + 上市公司语境 | 3 |
+| `research` | 与造假、审计质量或内控直接相关的研究 | 2 |
+
+单次最多选择 12 条候选，最多向 AI 提供 10 篇已成功读取正文的材料，最终输出
+1 至 6 篇；有 6 篇以内合格正文时全部输出，超过 6 篇时选择其中 4 至 6 篇。
+每篇包括：
+
+- 核心命题及执法程序阶段；
+- 可追溯的事实链；
+- 造假/错报机制、关键审计程序和监管逻辑；
+- 对财报使用者、审计委员会、审计机构和监管实践的观察；
+- 尚未终局、证据缺口和后续核验事项。
+
+AI 返回必须通过 Pydantic Schema、来源链接、标题、日期和正文可用性校验。调查、指控、拟处罚、和解和最终处罚必须区分，不能把指控写成既定事实。
 
 ## GitHub Actions 配置
 
-工作流文件是 [.github/workflows/morning-brief.yml](.github/workflows/morning-brief.yml)。其中的 `30 23 * * *` 是 UTC 时间，对应北京时间每天 07:30；也可以在 GitHub 的 Actions 页面使用 **Run workflow** 手动触发。
+工作流文件是 [`.github/workflows/morning-brief.yml`](.github/workflows/morning-brief.yml)。其中 `30 23 * * *` 为 UTC 时间，对应北京时间每天 07:30；也可以在 GitHub Actions 页面手动触发。
 
 在仓库的 **Settings → Secrets and variables → Actions** 中添加：
 
 | Secret | 必填 | 用途 |
 | --- | --- | --- |
-| `AI_API_KEY` | 是 | OpenAI 兼容 AI 网关的密钥 |
-| `DINGTALK_WEBHOOK` | 否 | 钉钉机器人 Webhook；留空时把完整深度阅读打印到 Actions 日志 |
-| `DINGTALK_SECRET` | 否 | 仅在钉钉机器人启用“加签”安全设置时需要 |
-| `SEC_USER_AGENT` | 是 | 含联系邮箱的 SEC/CFTC 请求标识，例如 `newsbot/1.0 contact=you@example.com` |
-| `SCHOLAR_IMAP_HOST`、`SCHOLAR_IMAP_USERNAME`、`SCHOLAR_IMAP_PASSWORD` | 否 | 接收 Scholar Alert 的专用邮箱 IMAP 参数 |
-| `SCHOLAR_IMAP_PORT` | 否 | 默认为 `993` |
+| `AI_API_KEY` | 是 | OpenAI 兼容 AI 网关密钥 |
+| `DINGTALK_WEBHOOK` | 否 | 钉钉机器人 Webhook；留空时打印到 Actions 日志 |
+| `DINGTALK_SECRET` | 否 | 钉钉机器人启用“加签”时需要 |
+| `SEC_USER_AGENT` | 建议 | 含联系邮箱的 SEC 请求标识，例如 `audit-bot/2.0 contact=you@example.com` |
+| `DELIVERY_HISTORY_FILE` | 否 | URL 去重文件，默认 `.cache/delivered_urls.json` |
+| `SCHOLAR_IMAP_HOST`、`SCHOLAR_IMAP_USERNAME`、`SCHOLAR_IMAP_PASSWORD` | 否 | 接收 Scholar Alert 的专用邮箱 |
+| `SCHOLAR_IMAP_PORT` | 否 | 默认 `993` |
 | `FT_FEED_URL` | 否 | 合法授权的 FT RSS 地址 |
-| `FT_EMAIL_SENDER` | 否 | 同一 IMAP 邮箱中 FT 官方通讯的发件人地址 |
+| `FT_EMAIL_SENDER` | 否 | 同一 IMAP 邮箱中 FT 官方通讯的发件人 |
 
-`AI_BASE_URL` 和 `AI_MODEL` 在代码中分别默认使用 `https://minitoken.top/v1` 与 `deepseek-v4-flash`；本地运行时可通过 `.env` 覆盖。额外 RSS 与其公开正文域名应分别写入 Actions variables `EXTRA_RSS_FEEDS`、`EXTRA_ARTICLE_DOMAINS`，格式见上节。
+`AI_BASE_URL` 和 `AI_MODEL` 可通过 `.env` 或 Actions secrets/variables 覆盖。
 
-若使用 Scholar，建议建立以下提醒：
+## 自定义公开来源
+
+设置 `EXTRA_RSS_FEEDS`，每行一个 `来源名称|https://rss-url`。如果希望读取这些来源的公开正文，再在 `EXTRA_ARTICLE_DOMAINS` 中列出域名：
 
 ```text
-commodity futures
-crude oil price
-gold safe haven
+EXTRA_RSS_FEEDS=Example Audit Regulator|https://example.org/news/rss.xml
+EXTRA_ARTICLE_DOMAINS=example.org
+```
+
+额外来源不会因配置而自动获得高相关分类，仍需通过相同的复合主题门槛。只应加入无需登录、没有付费墙且你有权访问的公开来源。
+
+建议的 Scholar Alerts：
+
+```text
 financial statement fraud
-internal control
+audit quality
+auditor independence
+financial restatement
+internal control weakness
 forensic accounting
 ```
 
 ## 本地验证
 
-复制环境变量模板并填写测试凭据：
+复制环境变量模板并安装依赖：
 
 ```bash
 cp .env.example .env
@@ -82,24 +127,31 @@ python -m venv .venv
 . .venv/bin/activate
 pip install -r requirements-dev.txt
 pytest -q
+```
+
+查看真实抓取和筛选漏斗，但不推送钉钉：
+
+```bash
+python -m app.cli simulate --no-ai
+python -m app.cli simulate --hours 168 --no-ai
+python inspect_fetch.py --source SEC
+python inspect_fetch.py --source 证监会
+```
+
+执行完整生产任务：
+
+```bash
 python -m app.cli run-once
 ```
 
-最后一条命令会调用真实来源与 AI 网关；设置 `DINGTALK_WEBHOOK` 时发送钉钉消息，未设置时直接打印完整深度阅读。测试本身不会调用外部服务。
-
-如果想先在不推送钉钉的情况下查看每一步（抓取 / 筛选 / 读正文 / AI 生成）的中间结果，可以用模拟命令：
-
-```bash
-python -m app.cli simulate              # 生产窗口（24h，周一 72h）
-python -m app.cli simulate --hours 168  # 指定抓取窗口
-python -m app.cli simulate --no-ai      # 跳过 AI，只看抓取/筛选/读正文
-```
-
-`simulate` 不会真正调用钉钉 Webhook，只打印“将会推送”的报告内容；需要真实推送仍用 `run-once`。
+`simulate` 不会调用钉钉 Webhook。`run-once` 在未配置 Webhook 时会把完整报告打印到日志。
 
 ## 失败处理
 
-- 每个订阅源独立超时并重试三次；单一来源失败不影响其余来源。
-- 每篇公开正文独立读取；正文不可用时只跳过该篇，不会回退为对受限文章的“全文阅读”。
-- AI 返回必须通过 Pydantic Schema、来源链接、标题、日期和“已读取公开正文”校验；连续失败三次时不发送未经验证的内容，而是发送故障通知（或打印到日志）。
+- 每个来源独立超时并重试三次，来源之间并发抓取，单源失败不影响其他来源。
+- 对允许公开读取的官方页面先读取正文，再进行分类评分，避免笼统标题造成漏选。
+- 正文只从白名单公开页面读取；单篇不可用时跳过，不伪装成“全文解读”。
+- 已推送 URL 会被过滤；缓存不包含新闻正文或生成报告。
+- 没有通过主题门槛的材料时正常结束并发送“暂无高相关更新”。
+- 有候选但正文读取或 AI 校验连续失败时发送故障通知。
 - 所有输出均标注“仅供研究参考，不构成投资建议”。

@@ -3,18 +3,24 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from app.models import ContentItem, ItemCategory
-from app.scoring import MAX_CANDIDATES, select_candidates, score_item
+from app.rules import MAX_CANDIDATES, MAX_ITEMS_PER_SOURCE
+from app.scoring import score_item, select_candidates
+
+
+NOW = datetime(2026, 7, 19, 1, tzinfo=timezone.utc)
 
 
 def _item(
     title: str,
     summary: str,
     *,
-    source: str = "Forbes",
+    source: str = "General Business",
     url: str = "https://example.test/item",
+    category: ItemCategory = ItemCategory.OTHER,
 ) -> ContentItem:
     return ContentItem(
         source=source,
+        category=category,
         title=title,
         url=url,
         summary=summary,
@@ -22,260 +28,296 @@ def _item(
     )
 
 
-def test_generic_demand_and_cost_do_not_make_an_article_a_commodity() -> None:
+def test_financial_reporting_fraud_routes_to_enforcement_category() -> None:
     item = score_item(
         _item(
-            "Why concert tickets have become expensive",
-            "Dynamic pricing, consumer demand, and production cost are driving ticket prices.",
+            "Listed company charged with financial statement fraud",
+            "The issuer allegedly used fictitious revenue and inflated earnings in its annual report.",
         ),
-        now=datetime(2026, 7, 19, 1, tzinfo=timezone.utc),
+        now=NOW,
+    )
+
+    assert item.category == ItemCategory.FRAUD_ENFORCEMENT
+    assert any(reason.startswith("财务造假：") for reason in item.score_reasons)
+
+
+def test_full_text_can_supply_topic_context_missing_from_feed_headline() -> None:
+    item = _item(
+        "Example Holdings and its former controller",
+        "Official enforcement release.",
+        source="SEC Litigation Releases",
+        url="https://www.sec.gov/enforcement-litigation/example",
+    )
+    item.article_text = (
+        "The listed company filed annual financial statements that materially "
+        "overstated revenue through fictitious sales and fraudulent financial reporting."
+    )
+
+    scored = score_item(item, now=NOW)
+
+    assert scored.category == ItemCategory.FRAUD_ENFORCEMENT
+
+
+def test_generic_retail_fraud_does_not_pass_topic_gate_even_from_sec() -> None:
+    item = score_item(
+        _item(
+            "SEC forms new retail fraud working group",
+            "The initiative addresses scams targeting individual investors.",
+            source="SEC Press Releases",
+            url="https://www.sec.gov/newsroom/press-releases/example",
+        ),
+        now=NOW,
     )
 
     assert item.category == ItemCategory.OTHER
-    assert item.score_reasons == ["时效性高"]
+    assert item.score == 0
 
 
-def test_commodity_anchor_allows_supply_context_to_increase_score() -> None:
+def test_market_manipulation_penalty_is_not_financial_reporting_enforcement() -> None:
     item = score_item(
-        _item("Crude oil futures rise", "Oil supply and inventory changes affect futures."),
-        now=datetime(2026, 7, 19, 1, tzinfo=timezone.utc),
-    )
-
-    assert item.category == ItemCategory.COMMODITY
-    assert "商品/期货：crude、futures、oil" in item.score_reasons
-    assert item.score > 55
-
-
-def test_word_boundary_prevents_oil_matching_boiling() -> None:
-    item = score_item(
-        _item("Boiling water safety guide", "Consumer demand for kitchen equipment is rising."),
-        now=datetime(2026, 7, 19, 1, tzinfo=timezone.utc),
+        _item(
+            "中国证券监督管理委员会行政处罚决定书",
+            "当事人通过多个账户操纵股票并受到行政处罚。",
+            source="中国证监会行政处罚",
+            url="https://www.csrc.gov.cn/example",
+        ),
+        now=NOW,
     )
 
     assert item.category == ItemCategory.OTHER
 
 
-def test_extended_commodity_vocabulary_covers_metals_and_agriculture() -> None:
-    item = score_item(
-        _item("Lithium and wheat futures advance", "Inventories fell while exports increased."),
-        now=datetime(2026, 7, 19, 1, tzinfo=timezone.utc),
-    )
-
-    assert item.category == ItemCategory.COMMODITY
-    assert "商品/期货：futures、lithium、wheat" in item.score_reasons
-
-
-def test_expanded_priority_topics_receive_dedicated_categories() -> None:
-    now = datetime(2026, 7, 19, 1, tzinfo=timezone.utc)
-    capital_markets = score_item(
-        _item("IPO and stock market listing", "The capital markets transaction is underway."), now=now
-    )
-    governance_audit = score_item(
-        _item("Auditor independence reviewed by audit committee", "Internal control over financial reporting was assessed."), now=now
-    )
-    policy_ai = score_item(
-        _item("AI regulation proposed", "The legal policy framework targets AI governance."), now=now
-    )
-
-    assert capital_markets.category == ItemCategory.CAPITAL_MARKETS
-    assert governance_audit.category == ItemCategory.GOVERNANCE_AUDIT
-    assert policy_ai.category == ItemCategory.POLICY_AI
-
-
-def test_macro_market_driver_category() -> None:
+def test_chinese_financial_fraud_and_penalty_pass_compound_gate() -> None:
     item = score_item(
         _item(
-            "Federal Reserve signals interest rate cut",
-            "Inflation and Treasury yields remain central to monetary policy.",
-            source="Federal Reserve Press Releases",
-            url="https://www.federalreserve.gov/newsevents/pressreleases/example.htm",
+            "上市公司财务造假被行政处罚",
+            "公司连续三年通过虚构业务虚增收入，年度报告存在虚假记载。",
+            source="中国证监会行政处罚",
+            url="https://www.csrc.gov.cn/example",
         ),
-        now=datetime(2026, 7, 19, 1, tzinfo=timezone.utc),
+        now=NOW,
     )
 
-    assert item.category == ItemCategory.MACRO
-    assert any(reason.startswith("宏观驱动：") for reason in item.score_reasons)
-    assert "权威第一方来源" in item.score_reasons
+    assert item.category == ItemCategory.FRAUD_ENFORCEMENT
+    assert "第一方权威来源" in item.score_reasons
 
 
-def test_expanded_risk_vocabulary() -> None:
+def test_public_company_audit_failure_routes_to_audit_category() -> None:
     item = score_item(
         _item(
-            "Company investigates bribery and FCPA compliance failures",
-            "The board disclosed a corruption investigation.",
+            "Audit firm sanctioned over listed company audit",
+            "The auditor failed to obtain sufficient audit evidence and exercise professional skepticism.",
+            source="UK FRC Audit Enforcement",
+            url="https://www.frc.org.uk/example",
+            category=ItemCategory.PUBLIC_COMPANY_AUDIT,
         ),
-        now=datetime(2026, 7, 19, 1, tzinfo=timezone.utc),
+        now=NOW,
     )
 
-    assert item.category == ItemCategory.RISK
-    assert any(reason.startswith("财务造假与监管执法：") for reason in item.score_reasons)
+    assert item.category == ItemCategory.PUBLIC_COMPANY_AUDIT
+    assert any(reason.startswith("审计质量：") for reason in item.score_reasons)
 
 
-def test_regulatory_other_items_fill_candidate_pool_to_twelve() -> None:
-    now = datetime(2026, 7, 19, 1, tzinfo=timezone.utc)
-    items = [
-        score_item(
-            _item(
-                "Crude oil supply update",
-                "Oil inventories declined.",
-                url="https://example.test/oil",
-            ),
-            now=now,
-        )
-    ]
-    items.extend(
-        score_item(
-            _item(
-                f"Official statistical release {index}",
-                "A first-party statistical update.",
-                source="SEC Press Releases",
-                url=f"https://www.sec.gov/newsroom/press-releases/{index}",
-            ),
-            now=now,
-        )
-        for index in range(11)
+def test_generic_energy_audit_is_not_a_public_company_audit() -> None:
+    item = score_item(
+        _item(
+            "Factory completes energy audit",
+            "Engineers assessed electricity usage and equipment efficiency.",
+        ),
+        now=NOW,
     )
 
-    candidates = select_candidates(items)
+    assert item.category == ItemCategory.OTHER
 
-    assert len(candidates) == 12
-    assert all(
-        item.category != ItemCategory.OTHER or "权威第一方来源" in item.score_reasons
-        for item in candidates
+
+def test_smsf_auditor_enforcement_is_not_a_listed_company_audit() -> None:
+    item = score_item(
+        _item(
+            "ASIC acts against 36 SMSF auditors",
+            "The regulator took action against self-managed super fund auditors.",
+            source="ASIC Financial Reporting & Audit",
+            url="https://asic.gov.au/example",
+        ),
+        now=NOW,
     )
 
+    assert item.category == ItemCategory.OTHER
+    assert item.score == 0
 
-def test_candidate_pool_is_capped_at_sixteen() -> None:
-    now = datetime(2026, 7, 19, 1, tzinfo=timezone.utc)
-    items = [
+
+def test_generic_regulatory_meeting_is_not_promoted_by_body_boilerplate() -> None:
+    item = _item(
+        "中国证监会召开监管工作座谈会",
+        "会议强调依法从严打击财务造假，提升上市公司财务报告质量。",
+        source="中国证监会要闻",
+        url="https://www.csrc.gov.cn/example",
+    )
+    item.article_text = "会议部署监管工作，要求压实责任并防范财务造假。"
+
+    scored = score_item(item, now=NOW)
+
+    assert scored.category == ItemCategory.OTHER
+    assert scored.score == 0
+
+
+def test_listed_company_internal_control_issue_routes_to_reporting_controls() -> None:
+    item = score_item(
+        _item(
+            "Listed company discloses material weakness",
+            "The annual report describes internal control over financial reporting deficiencies.",
+        ),
+        now=NOW,
+    )
+
+    assert item.category == ItemCategory.REPORTING_CONTROLS
+
+
+def test_cninfo_inquiry_reply_keeps_document_type_when_quoting_fraud_context() -> None:
+    item = score_item(
+        _item(
+            "关于2025年年度报告监管问询函的回复公告",
+            "回复说明监管机构询问是否存在虚假记载及收入确认问题。",
+            source="巨潮资讯年报问询与审计回复",
+            url="https://static.cninfo.com.cn/example.pdf",
+            category=ItemCategory.REPORTING_CONTROLS,
+        ),
+        now=NOW,
+    )
+
+    assert item.category == ItemCategory.REPORTING_CONTROLS
+
+
+def test_pcaob_inspection_reports_route_to_public_company_audit() -> None:
+    item = score_item(
+        _item(
+            "PCAOB posts ten new inspection reports",
+            "The reports contain inspection findings.",
+            source="PCAOB",
+            url="https://pcaobus.org/news-events/news-releases/example",
+        ),
+        now=NOW,
+    )
+
+    assert item.category == ItemCategory.PUBLIC_COMPANY_AUDIT
+
+
+def test_dedicated_sec_aaer_accepts_respondent_only_headline() -> None:
+    item = score_item(
+        _item(
+            "Example Corporation and Jane Doe, CPA",
+            "Release No. 34-12345, AAER-9999",
+            source="SEC Accounting & Auditing Enforcement",
+            url="https://www.sec.gov/files/litigation/admin/example.pdf",
+            category=ItemCategory.FRAUD_ENFORCEMENT,
+        ),
+        now=NOW,
+    )
+
+    assert item.category == ItemCategory.FRAUD_ENFORCEMENT
+    assert "会计审计执法专门栏目" in item.score_reasons
+
+
+def test_dedicated_sec_aaer_drops_low_value_scheduling_orders() -> None:
+    item = score_item(
+        _item(
+            "Example Corporation (Order Granting Extension of Time)",
+            "Release No. 34-12345, AAER-9999",
+            source="SEC Accounting & Auditing Enforcement",
+            url="https://www.sec.gov/files/litigation/admin/example.pdf",
+            category=ItemCategory.FRAUD_ENFORCEMENT,
+        ),
+        now=NOW,
+    )
+
+    assert item.category == ItemCategory.OTHER
+    assert item.score == 0
+
+
+def test_audit_regulator_mou_is_not_selected_as_substantive_audit_news() -> None:
+    item = score_item(
+        _item(
+            "AFRC signs MoU with overseas regulator",
+            "The memorandum of understanding covers audit oversight cooperation.",
+            source="AFRC Hong Kong",
+            url="https://www.afrc.org.hk/example",
+        ),
+        now=NOW,
+    )
+
+    assert item.category == ItemCategory.OTHER
+    assert item.score == 0
+
+
+def test_scholar_alert_requires_a_focused_research_term() -> None:
+    unrelated = score_item(
+        _item(
+            "Commodity futures paper",
+            "Google Scholar Alert about oil prices.",
+            source="Google Scholar Alert",
+            category=ItemCategory.RESEARCH,
+        ),
+        now=NOW,
+    )
+    relevant = score_item(
+        _item(
+            "Audit quality after financial statement fraud",
+            "A forensic accounting study of public companies and auditor independence.",
+            source="Google Scholar Alert",
+            url="https://example.test/research",
+            category=ItemCategory.RESEARCH,
+        ),
+        now=NOW,
+    )
+
+    assert unrelated.category == ItemCategory.OTHER
+    assert relevant.category == ItemCategory.RESEARCH
+
+
+def test_candidate_selection_never_backfills_with_unrelated_items() -> None:
+    relevant = score_item(
+        _item(
+            "Listed company financial statement fraud",
+            "The issuer inflated earnings and restated its annual report.",
+            url="https://example.test/relevant",
+        ),
+        now=NOW,
+    )
+    unrelated = [
         score_item(
             _item(
-                f"Official statistical release {index}",
-                "A first-party statistical update.",
-                source="SEC Press Releases",
-                url=f"https://www.sec.gov/newsroom/press-releases/{index}",
+                f"Central bank statistical release {index}",
+                "Interest rates and inflation data.",
+                source="Official statistics",
+                url=f"https://example.test/unrelated-{index}",
             ),
-            now=now,
+            now=NOW,
         )
         for index in range(20)
     ]
 
+    candidates = select_candidates([relevant, *unrelated])
+
+    assert candidates == [relevant]
+
+
+def test_candidate_selection_caps_each_source_and_total() -> None:
+    items: list[ContentItem] = []
+    for source_index, source in enumerate(("SEC Press Releases", "PCAOB", "UK FRC Audit Enforcement")):
+        for item_index in range(10):
+            items.append(
+                score_item(
+                    _item(
+                        f"Audit firm {source_index}-{item_index} sanctioned",
+                        "A public company auditor failed to obtain sufficient audit evidence.",
+                        source=source,
+                        url=f"https://example.test/{source_index}-{item_index}",
+                    ),
+                    now=NOW,
+                )
+            )
+
     candidates = select_candidates(items)
 
     assert len(candidates) == MAX_CANDIDATES
-    assert all("权威第一方来源" in item.score_reasons for item in candidates)
-
-
-def test_central_bank_other_no_longer_backfills_candidate_pool() -> None:
-    now = datetime(2026, 7, 19, 1, tzinfo=timezone.utc)
-    items = [
-        score_item(
-            _item(
-                "Crude oil supply update",
-                "Oil inventories declined.",
-                url="https://example.test/oil",
-            ),
-            now=now,
-        )
-    ]
-    items.extend(
-        score_item(
-            _item(
-                f"Official statistical release {index}",
-                "A first-party statistical update.",
-                source="Federal Reserve Press Releases",
-                url=f"https://www.federalreserve.gov/releases/{index}.htm",
-            ),
-            now=now,
-        )
-        for index in range(11)
-    )
-
-    candidates = select_candidates(items)
-
-    # Central-bank/statistical-agency OTHER items no longer backfill the pool;
-    # only the keyword-matched commodity article remains.
-    assert len(candidates) == 1
-    assert candidates[0].category == ItemCategory.COMMODITY
-
-
-def test_fraud_scheme_vocabulary_routes_to_risk() -> None:
-    item = score_item(
-        _item(
-            "Company booked fictitious revenue via channel stuffing",
-            "Round-tripping inflated sales while related-party transactions were undisclosed.",
-        ),
-        now=datetime(2026, 7, 19, 1, tzinfo=timezone.utc),
-    )
-
-    assert item.category == ItemCategory.RISK
-    assert any(reason.startswith("财务造假与监管执法：") for reason in item.score_reasons)
-
-
-def test_regulatory_action_vocabulary_routes_to_risk() -> None:
-    item = score_item(
-        _item(
-            "Regulator issues Wells notice and subpoena over disgorgement",
-            "A cease-and-desist order and civil penalty followed the charges.",
-        ),
-        now=datetime(2026, 7, 19, 1, tzinfo=timezone.utc),
-    )
-
-    assert item.category == ItemCategory.RISK
-    assert any(reason.startswith("财务造假与监管执法：") for reason in item.score_reasons)
-
-
-def test_chinese_fraud_and_regulatory_terms_route_to_risk() -> None:
-    item = score_item(
-        _item(
-            "某公司财务造假被立案调查",
-            "证监会对其虚增收入行为作出行政处罚并下发警示函。",
-        ),
-        now=datetime(2026, 7, 19, 1, tzinfo=timezone.utc),
-    )
-
-    assert item.category == ItemCategory.RISK
-    assert any(reason.startswith("财务造假与监管执法：") for reason in item.score_reasons)
-
-
-def test_pure_audit_vocabulary_routes_to_governance_audit() -> None:
-    item = score_item(
-        _item(
-            "Auditor independence and Sarbanes-Oxley 10-K review",
-            "The audit committee assessed key audit matters.",
-        ),
-        now=datetime(2026, 7, 19, 1, tzinfo=timezone.utc),
-    )
-
-    assert item.category == ItemCategory.GOVERNANCE_AUDIT
-    assert any(reason.startswith("上市公司审计与治理：") for reason in item.score_reasons)
-
-
-def test_regulatory_source_bonus_is_consistent_across_risk_and_governance() -> None:
-    now = datetime(2026, 7, 19, 1, tzinfo=timezone.utc)
-    risk_item = score_item(
-        _item(
-            "Company restates financials after fraud",
-            "Material weakness in internal control was cited.",
-            source="SEC Press Releases",
-            url="https://www.sec.gov/newsroom/press-releases/risk",
-        ),
-        now=now,
-    )
-    audit_item = score_item(
-        _item(
-            "PCAOB adopts new auditing standard",
-            "Auditor independence and audit committee guidance updated.",
-            source="PCAOB",
-            url="https://pcaobus.org/news-events/news-releases/audit",
-        ),
-        now=now,
-    )
-
-    assert risk_item.category == ItemCategory.RISK
-    assert audit_item.category == ItemCategory.GOVERNANCE_AUDIT
-    # 两类监管来源都只加一次“第一方监管来源”，不再叠加“权威第一方来源”15 分
-    assert "第一方监管来源" in risk_item.score_reasons
-    assert "第一方监管来源" in audit_item.score_reasons
-    assert "权威第一方来源" not in risk_item.score_reasons
-    assert "权威第一方来源" not in audit_item.score_reasons
+    for source in {item.source for item in candidates}:
+        assert sum(item.source == source for item in candidates) <= MAX_ITEMS_PER_SOURCE

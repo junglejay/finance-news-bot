@@ -65,13 +65,21 @@ class DingTalkNotifier:
         total = len(report.analyses)
         results: list[DeliveryResult] = []
         for index, analysis in enumerate(report.analyses, start=1):
-            title = f"全球资本市场风控与监管（{report.report_date.isoformat()}）{index}/{total}"
+            title = f"财务造假与上市公司审计（{report.report_date.isoformat()}）{index}/{total}"
             results.append(await self.send_markdown(title, report.article_to_markdown(analysis)))
         return results
 
     async def send_fault(self, message: str) -> DeliveryResult:
-        text = f"# 全球资本市场风控与监管：任务异常\n\n{message}\n\n请检查任务日志与数据源状态。"
-        return await self.send_markdown("全球资本市场风控与监管：任务异常", text)
+        text = f"# 财务造假与上市公司审计：任务异常\n\n{message}\n\n请检查任务日志与数据源状态。"
+        return await self.send_markdown("财务造假与上市公司审计：任务异常", text)
+
+    async def send_no_update(self, report_date: str) -> DeliveryResult:
+        text = (
+            f"# 财务造假与上市公司审计（{report_date}）\n\n"
+            "本次监测窗口内没有达到相关性门槛且具备可核验正文的新材料。"
+            "系统不会用商品、宏观或泛证券监管新闻补足数量。"
+        )
+        return await self.send_markdown("财务造假与上市公司审计：暂无高相关更新", text)
 
     async def send_markdown(self, title: str, markdown: str) -> DeliveryResult:
         # Ensure the required keyword is present so keyword-based robots accept the message

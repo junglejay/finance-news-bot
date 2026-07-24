@@ -12,6 +12,11 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class ItemCategory(StrEnum):
+    FRAUD_ENFORCEMENT = "fraud_enforcement"
+    PUBLIC_COMPANY_AUDIT = "public_company_audit"
+    REPORTING_CONTROLS = "reporting_controls"
+    # Legacy values remain readable for callers that construct ContentItem
+    # directly, but the active classifier no longer selects these topics.
     COMMODITY = "commodity"
     MACRO = "macro"
     CAPITAL_MARKETS = "capital_markets"
@@ -77,11 +82,11 @@ class ArticleAnalysis(BaseModel):
 
 class DeepReadingReport(BaseModel):
     report_date: date
-    analyses: list[ArticleAnalysis] = Field(min_length=1, max_length=5)
+    analyses: list[ArticleAnalysis] = Field(min_length=1, max_length=6)
     disclaimer: str = "本文仅供研究参考，不构成投资建议。"
 
     def to_markdown(self) -> str:
-        lines = [f"# 全球资本市场风控与监管：深度阅读（{self.report_date.isoformat()}）", ""]
+        lines = [f"# 财务造假、监管与上市公司审计：深度阅读（{self.report_date.isoformat()}）", ""]
         for index, item in enumerate(self.analyses, start=1):
             lines.extend(
                 [
@@ -95,7 +100,7 @@ class DeepReadingReport(BaseModel):
                 ]
             )
             lines.extend(f"- {fact}" for fact in item.fact_chain)
-            lines.extend(["", "### 深度解读", item.detailed_reading, "", "### 影响传导与风险观察"])
+            lines.extend(["", "### 深度解读", item.detailed_reading, "", "### 监管与审计关注"])
             lines.extend(f"- {entry}" for entry in item.transmission_or_risk)
             if item.limits_and_next_checks:
                 lines.extend(["", "### 反证、局限与后续核验"])

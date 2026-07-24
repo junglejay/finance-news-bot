@@ -34,7 +34,7 @@ class ReportGenerator(Protocol):
 
 
 def _output_count_bounds(available_articles: int) -> tuple[int, int]:
-    """Return every available article when there are four or fewer."""
+    """Return every available article up to the configured output ceiling."""
     if available_articles <= MAX_AI_OUTPUT_ARTICLES:
         return available_articles, available_articles
     return MIN_AI_OUTPUT_ARTICLES, MAX_AI_OUTPUT_ARTICLES

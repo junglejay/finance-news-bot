@@ -57,6 +57,7 @@ class Settings:
     sec_user_agent: str
     extra_rss_feeds: tuple[tuple[str, str], ...]
     extra_article_domains: tuple[str, ...]
+    delivery_history_file: str
 
     @property
     def scholar_enabled(self) -> bool:
@@ -88,8 +89,12 @@ class Settings:
             scholar_imap_folder=_value("SCHOLAR_IMAP_FOLDER", "INBOX"),
             scholar_sender=_value("SCHOLAR_SENDER", "scholaralerts-noreply@google.com"),
             sec_user_agent=_value(
-                "SEC_USER_AGENT", "commodity-risk-intel-bot/1.0 contact=you@example.com"
+                "SEC_USER_AGENT", "audit-regulatory-intel-bot/2.0 contact=you@example.com"
             ),
             extra_rss_feeds=_rss_feed_pairs(),
             extra_article_domains=_article_domains(),
+            delivery_history_file=_value(
+                "DELIVERY_HISTORY_FILE",
+                ".cache/delivered_urls.json",
+            ),
         )

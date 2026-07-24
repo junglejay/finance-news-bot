@@ -7,7 +7,7 @@
 用法:
     python inspect_fetch.py                  # 按生产窗口抓取（最近 24h，周一 72h）
     python inspect_fetch.py --hours 168      # 抓最近 7 天，便于看清各源都有什么
-    python inspect_fetch.py --source EIA     # 只抓名称含 EIA 的源（可多次指定）
+    python inspect_fetch.py --source 证监会  # 只抓名称含“证监会”的源（可多次指定）
     python inspect_fetch.py --json           # 输出 JSON，便于管道处理
 """
 
@@ -191,7 +191,7 @@ def main() -> int:
     parser.add_argument(
         "--source",
         action="append",
-        help="只抓名称包含该子串的源（可多次指定，如 --source EIA --source SEC）",
+        help="只抓名称包含该子串的源（可多次指定，如 --source 证监会 --source SEC）",
     )
     parser.add_argument("--json", action="store_true", help="输出 JSON，便于管道处理")
     parser.add_argument("--env", default=".env", help="环境变量文件路径（默认 .env）")

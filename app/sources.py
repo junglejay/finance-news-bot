@@ -14,6 +14,7 @@ from email.header import decode_header, make_header
 from email.utils import parsedate_to_datetime
 from typing import Iterable
 from urllib.parse import urljoin, urlsplit
+from zoneinfo import ZoneInfo
 
 import feedparser
 import httpx
@@ -23,30 +24,26 @@ from dateutil import parser as date_parser, tz
 from .config import Settings
 from .models import ContentItem, ItemCategory
 from .rules import (
+    AFRC_PRESS_RELEASES_URL,
     ARTICLE_READER_CONCURRENCY,
-    BOJ_WHATS_NEW_RSS,
-    BOK_PRESS_RELEASES_RSS,
-    BIS_PRESS_RELEASES_RSS,
-    BIS_STATISTICAL_RELEASES_RSS,
-    CFTC_PRESS_URL,
-    EBA_NEWS_RSS,
-    ECB_NEWS_RSS,
-    ECB_STATISTICAL_RELEASES_RSS,
-    EIA_PRESS_RELEASES_RSS,
-    EIA_TODAY_IN_ENERGY_RSS,
-    FEDERAL_RESERVE_PRESS_RSS,
-    FORBES_BUSINESS_RSS,
+    ASIC_MEDIA_RELEASES_API,
+    CNINFO_ANNOUNCEMENTS_API,
+    CNINFO_PDF_BASE_URL,
+    CSRC_NEWS_API,
+    CSRC_PENALTIES_API,
+    FRC_AUDIT_ENFORCEMENT_URL,
     FULL_TEXT_BLOCKED_SOURCES,
-    HTTPS_UPGRADE_HOSTS,
+    IAASB_NEWS_URL,
     MAX_ARTICLE_CHARS,
     MIN_ARTICLE_CHARS,
+    MOF_SANCTIONS_URL,
     PCAOB_NEWS_URL,
     PUBLIC_ARTICLE_DOMAINS,
-    SEC_AAER_URL,
-    SEC_PRESS_URL,
-    GUARDIAN_BUSINESS_RSS,
-    WSJ_US_BUSINESS_RSS,
-    YAHOO_FINANCE_RSS,
+    SEC_AAER_RSS,
+    SEC_ADMIN_PROCEEDINGS_RSS,
+    SEC_LITIGATION_RSS,
+    SEC_PRESS_RSS,
+    THOMSON_REUTERS_PCAOB_URL,
 )
 
 
@@ -87,14 +84,6 @@ def _clean_text(value: str) -> str:
     return " ".join(BeautifulSoup(value or "", "html.parser").get_text(" ").split())
 
 
-def _upgrade_known_https_url(value: str) -> str:
-    """Use HTTPS for official feeds whose legacy items still contain HTTP links."""
-    split = urlsplit(value)
-    if split.scheme == "http" and (split.hostname or "").lower() in HTTPS_UPGRADE_HOSTS:
-        return split._replace(scheme="https").geturl()
-    return value
-
-
 class RSSSource(Source):
     def __init__(self, name: str, feed_url: str, category: ItemCategory = ItemCategory.OTHER) -> None:
         self.name = name
@@ -104,7 +93,10 @@ class RSSSource(Source):
     async def fetch(self, since: datetime) -> list[ContentItem]:
         try:
             async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-                response = await client.get(self.feed_url, headers={"User-Agent": "commodity-risk-intel-bot/1.0"})
+                response = await client.get(
+                    self.feed_url,
+                    headers={"User-Agent": "audit-regulatory-intel-bot/2.0"},
+                )
                 response.raise_for_status()
             parsed = feedparser.parse(response.content)
         except (httpx.HTTPError, ValueError) as exc:
@@ -114,7 +106,7 @@ class RSSSource(Source):
         items: list[ContentItem] = []
         for entry in parsed.entries:
             title = _clean_text(entry.get("title", ""))
-            url = _upgrade_known_https_url(entry.get("link", "").strip())
+            url = entry.get("link", "").strip()
             if not title or not url:
                 continue
             published = _to_utc(entry.get("published") or entry.get("updated"), now)
@@ -161,7 +153,11 @@ class PublicArticleReader:
     async def _enrich_one(
         self, client: httpx.AsyncClient, semaphore: asyncio.Semaphore, item: ContentItem
     ) -> None:
+        if item.article_text:
+            item.metadata.setdefault("article_read_status", "provided_by_source")
+            return
         if not self._is_allowed(item):
+            item.metadata.setdefault("article_read_status", "skipped_source_or_domain")
             logger.debug(f"Skipping {item.source} '{item.title[:50]}' - source/domain not allowed")
             return
         try:
@@ -174,7 +170,10 @@ class PublicArticleReader:
                     try:
                         response = await client.get(
                             item.url,
-                            headers={"User-Agent": "commodity-risk-intel-bot/1.0", "Accept": "text/html,application/xhtml+xml"},
+                            headers={
+                                "User-Agent": "audit-regulatory-intel-bot/2.0",
+                                "Accept": "text/html,application/xhtml+xml,application/pdf",
+                            },
                         )
                         response.raise_for_status()
                         break
@@ -219,7 +218,17 @@ def _extract_public_article_text(html: str, max_characters: int) -> str:
     soup = BeautifulSoup(html, "html.parser")
     for element in soup.select("script, style, noscript, nav, header, footer, aside, form, svg"):
         element.decompose()
-    root = soup.find("article") or soup.find("main") or soup.select_one('[role="main"]') or soup.body
+    # Prefer known editorial-body containers over the whole <main>. Regulatory
+    # sites frequently append "More news" cards whose audit-related words would
+    # otherwise contaminate classification of an unrelated announcement.
+    root = (
+        soup.select_one(".detail-page .ck-content")
+        or soup.select_one(".ck-content")
+        or soup.find("article")
+        or soup.find("main")
+        or soup.select_one('[role="main"]')
+        or soup.body
+    )
     if root is None:
         return ""
     blocks: list[str] = []
@@ -228,7 +237,14 @@ def _extract_public_article_text(html: str, max_characters: int) -> str:
         if len(text) < 30 or (blocks and text == blocks[-1]):
             continue
         blocks.append(text)
-    return "\n".join(blocks)[:max_characters]
+    joined = "\n".join(blocks)
+    if len(joined) < MIN_ARTICLE_CHARS:
+        # Some government pages use div/span plus <br> instead of paragraphs.
+        # Falling back to the main container keeps those public decisions usable.
+        fallback = _clean_text(root.get_text(" "))
+        if len(fallback) > len(joined):
+            joined = fallback
+    return joined[:max_characters]
 
 
 def _extract_pdf_text(content: bytes, max_characters: int) -> str:
@@ -247,6 +263,621 @@ def _extract_pdf_text(content: bytes, max_characters: int) -> str:
         logger.debug(f"PDF text extraction failed: {exc}")
         return ""
     return " ".join("\n".join(blocks).split())[:max_characters]
+
+
+def parse_csrc_records(
+    payload: dict, source: str, since: datetime
+) -> list[ContentItem]:
+    """Convert CSRC's public search JSON into typed, full-text records."""
+    results = payload.get("data", {}).get("results", [])
+    if not isinstance(results, list):
+        return []
+
+    now = datetime.now(timezone.utc)
+    items: list[ContentItem] = []
+    for record in results:
+        if not isinstance(record, dict):
+            continue
+        title = _clean_text(str(record.get("title", "")))
+        raw_url = str(record.get("url", "")).strip()
+        published = _to_utc(str(record.get("publishedTimeStr", "")), now)
+        if not title or not raw_url or published < since:
+            continue
+        url = f"https:{raw_url}" if raw_url.startswith("//") else urljoin(CSRC_NEWS_API, raw_url)
+        summary = _clean_text(str(record.get("memo") or record.get("content") or ""))
+        article_text = _clean_text(str(record.get("content") or ""))
+        if title in {"中国证券监督管理委员会行政处罚决定书", "行政处罚决定书"} and summary:
+            title = f"{title}｜{summary[:160]}"
+        items.append(
+            ContentItem(
+                source=source,
+                title=title[:500],
+                url=url,
+                summary=(article_text or summary)[:8_000],
+                article_text=article_text[:MAX_ARTICLE_CHARS],
+                published_at=published,
+                metadata={
+                    "channel": str(record.get("channelName", "")),
+                    "manuscript_id": str(record.get("manuscriptId", "")),
+                    "article_read_status": (
+                        "provided_by_source" if len(article_text) >= MIN_ARTICLE_CHARS else "insufficient_source_text"
+                    ),
+                },
+            )
+        )
+    return _unique_by_url(items)
+
+
+def parse_asic_records(payload: object, since: datetime) -> list[ContentItem]:
+    """Convert ASIC's public newsroom JSON to media-release records."""
+    if not isinstance(payload, list):
+        return []
+
+    now = datetime.now(timezone.utc)
+    items: list[ContentItem] = []
+    for record in payload:
+        if not isinstance(record, dict):
+            continue
+        title = _clean_text(str(record.get("name", "")))
+        raw_url = str(record.get("url", "")).strip()
+        published = _to_utc(
+            # ASIC's publishedDate is a local newsroom date that is sometimes
+            # emitted with a misleading trailing Z. createDate is the actual
+            # machine timestamp and avoids future-dated candidates.
+            str(record.get("createDate") or record.get("publishedDate") or ""),
+            now,
+        )
+        if not title or not raw_url or published < since:
+            continue
+        summary = _clean_text(
+            " ".join(
+                (
+                    str(record.get("metaDescription", "")),
+                    str(record.get("summary", "")),
+                    " ".join(str(value) for value in record.get("metaSubject", [])),
+                    " ".join(str(value) for value in record.get("metaFunction", [])),
+                )
+            )
+        )
+        items.append(
+            ContentItem(
+                source="ASIC Financial Reporting & Audit",
+                title=title,
+                url=urljoin("https://www.asic.gov.au/newsroom/media-releases/", raw_url),
+                summary=summary[:4_000],
+                published_at=published,
+                metadata={
+                    "document_number": str(record.get("documentNumber", "")),
+                    "api_url": ASIC_MEDIA_RELEASES_API,
+                },
+            )
+        )
+    return _unique_by_url(items)
+
+
+class ASICJSONSource(Source):
+    name = "ASIC Financial Reporting & Audit"
+
+    async def fetch(self, since: datetime) -> list[ContentItem]:
+        try:
+            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+                response = await client.get(
+                    ASIC_MEDIA_RELEASES_API,
+                    headers={"User-Agent": "audit-regulatory-intel-bot/2.0"},
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise SourceFetchError(f"ASIC JSON fetch failed: {exc}") from exc
+        return parse_asic_records(payload, since)
+
+
+class CSRCJSONSource(Source):
+    def __init__(self, name: str, api_url: str) -> None:
+        self.name = name
+        self.api_url = api_url
+
+    async def fetch(self, since: datetime) -> list[ContentItem]:
+        try:
+            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+                response = await client.get(
+                    self.api_url,
+                    headers={"User-Agent": "audit-regulatory-intel-bot/2.0"},
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise SourceFetchError(f"CSRC JSON fetch failed: {exc}") from exc
+        return parse_csrc_records(payload, self.name, since)
+
+
+_MONTH_PATTERN = (
+    r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|"
+    r"Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Sept(?:ember)?|"
+    r"Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+)
+
+
+def _source_day_timestamp(
+    year: int,
+    month: int,
+    day: int,
+    timezone_name: str,
+    now: datetime,
+) -> datetime:
+    """Represent a source-local publication date without shifting its day.
+
+    Noon UTC keeps the stated source date stable in report validation. For the
+    current source-local day, cap the anchor at crawl time so scoring never sees
+    a future item. Date-only values remain an approximation and are labelled as
+    such by the listing parsers.
+    """
+    anchor = datetime(year, month, day, 12, tzinfo=timezone.utc)
+    source_today = now.astimezone(ZoneInfo(timezone_name)).date()
+    if source_today == anchor.date():
+        return min(anchor, now)
+    return anchor
+
+
+def _date_from_context(
+    context: str,
+    now: datetime,
+    timezone_name: str = "UTC",
+) -> datetime | None:
+    patterns = (
+        rf"{_MONTH_PATTERN}\.?\s+\d{{1,2}},\s+\d{{4}}",
+        rf"\d{{1,2}}\s+{_MONTH_PATTERN}\s+\d{{4}}",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, context, flags=re.IGNORECASE)
+        if match:
+            try:
+                parsed = date_parser.parse(match.group(0))
+            except (TypeError, ValueError, OverflowError):
+                return None
+            return _source_day_timestamp(
+                parsed.year,
+                parsed.month,
+                parsed.day,
+                timezone_name,
+                now,
+            )
+    return None
+
+
+def parse_dated_listing(
+    html: str,
+    page_url: str,
+    source: str,
+    link_pattern: str,
+    since: datetime,
+    category: ItemCategory = ItemCategory.OTHER,
+    date_timezone: str = "UTC",
+) -> list[ContentItem]:
+    """Parse cards/list items whose headline and publication date share a container."""
+    soup = BeautifulSoup(html, "html.parser")
+    now = datetime.now(timezone.utc)
+    items: list[ContentItem] = []
+    seen: set[str] = set()
+    for anchor in soup.select("a[href]"):
+        href = anchor.get("href", "")
+        if link_pattern not in href:
+            continue
+        anchor_context = _clean_text(anchor.get_text(" "))
+        title_element = anchor.select_one(
+            "h2, h3, h4, h5, [class*='item-title'], [class*='card-title']"
+        )
+        title = _clean_text(
+            title_element.get_text(" ") if title_element else anchor_context
+        )
+        url = urljoin(page_url, href)
+        if not title or url in seen:
+            continue
+
+        context = anchor_context
+        published = _date_from_context(anchor_context, now, date_timezone)
+        if published is None:
+            for container in anchor.parents:
+                if getattr(container, "name", None) not in {"div", "li", "article"}:
+                    continue
+                candidate_context = _clean_text(container.get_text(" "))
+                candidate_date = _date_from_context(
+                    candidate_context,
+                    now,
+                    date_timezone,
+                )
+                if candidate_date is not None:
+                    context = candidate_context
+                    published = candidate_date
+                    break
+        if published is None or published < since:
+            continue
+        seen.add(url)
+        items.append(
+            ContentItem(
+                source=source,
+                category=category,
+                title=title,
+                url=url,
+                summary=context[:2_000],
+                published_at=published,
+                metadata={"listing_url": page_url, "date_precision": "day"},
+            )
+        )
+    return items
+
+
+class DatedListingSource(Source):
+    def __init__(
+        self,
+        name: str,
+        url: str,
+        link_pattern: str,
+        category: ItemCategory = ItemCategory.OTHER,
+        date_timezone: str = "UTC",
+    ) -> None:
+        self.name = name
+        self.url = url
+        self.link_pattern = link_pattern
+        self.category = category
+        self.date_timezone = date_timezone
+
+    async def fetch(self, since: datetime) -> list[ContentItem]:
+        try:
+            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+                response = await client.get(
+                    self.url,
+                    headers={"User-Agent": "audit-regulatory-intel-bot/2.0"},
+                )
+                response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise SourceFetchError(f"dated listing fetch failed: {exc}") from exc
+        return parse_dated_listing(
+            response.text,
+            self.url,
+            self.name,
+            self.link_pattern,
+            since,
+            self.category,
+            self.date_timezone,
+        )
+
+
+def parse_thomson_reuters_topic(
+    html: str,
+    page_url: str,
+    since: datetime,
+) -> list[ContentItem]:
+    """Parse the public PCAOB topic cards without picking up site navigation."""
+    soup = BeautifulSoup(html, "html.parser")
+    now = datetime.now(timezone.utc)
+    items: list[ContentItem] = []
+    for card in soup.select(".card-post"):
+        anchor = card.select_one('.card-post__title a[href*="/news/"]')
+        if anchor is None:
+            continue
+        title = _clean_text(anchor.get_text(" "))
+        context = _clean_text(card.get_text(" "))
+        published = _date_from_context(
+            context,
+            now,
+            "America/New_York",
+        )
+        if not title or published is None or published < since:
+            continue
+        items.append(
+            ContentItem(
+                source="Thomson Reuters PCAOB",
+                title=title,
+                url=urljoin(page_url, anchor["href"]),
+                summary=context[:2_000],
+                published_at=published,
+                metadata={"listing_url": page_url, "date_precision": "day"},
+            )
+        )
+    return _unique_by_url(items)
+
+
+class ThomsonReutersPCAOBSource(Source):
+    name = "Thomson Reuters PCAOB"
+
+    def __init__(self, url: str = THOMSON_REUTERS_PCAOB_URL) -> None:
+        self.url = url
+
+    async def fetch(self, since: datetime) -> list[ContentItem]:
+        try:
+            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+                response = await client.get(
+                    self.url,
+                    headers={"User-Agent": "audit-regulatory-intel-bot/2.0"},
+                )
+                response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise SourceFetchError(f"Thomson Reuters PCAOB fetch failed: {exc}") from exc
+        return parse_thomson_reuters_topic(response.text, self.url, since)
+
+
+_CNINFO_QUERY_TERMS = (
+    "年报问询函",
+    "会计差错",
+    "非标准审计意见",
+    "警示函",
+    "立案",
+    "行政处罚",
+    "更正",
+)
+_CNINFO_NEGATIVE_TITLE_TERMS = ("不存在", "最近五年")
+_CNINFO_AUDITOR_TITLE_TERMS = ("会计师事务所", "注册会计师", "审计机构")
+
+
+def _is_focused_cninfo_title(title: str) -> bool:
+    if any(term in title for term in _CNINFO_NEGATIVE_TITLE_TERMS):
+        return False
+    annual_report = "年度报告" in title or "年报" in title
+    inquiry_reply = "问询函" in title and ("回复" in title or "专项说明" in title)
+    reporting_correction = annual_report and (
+        "更正" in title or "会计差错" in title
+    )
+    audit_exception = any(
+        term in title
+        for term in (
+            "非标准审计意见",
+            "非标审计意见",
+            "保留意见",
+            "否定意见",
+            "无法表示意见",
+        )
+    )
+    enforcement = any(
+        term in title
+        for term in (
+            "立案调查",
+            "行政处罚决定",
+            "警示函",
+            "纪律处分",
+            "公开谴责",
+        )
+    )
+    return (annual_report and inquiry_reply) or reporting_correction or audit_exception or enforcement
+
+
+def parse_cninfo_records(payloads: Iterable[dict], since: datetime) -> list[ContentItem]:
+    """Convert targeted public-company filings from CNInfo into candidates."""
+    items: list[ContentItem] = []
+    for payload in payloads:
+        records = payload.get("announcements") or []
+        if not isinstance(records, list):
+            continue
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            raw_title = str(record.get("announcementTitle", ""))
+            # Search highlights wrap matched words in <em>. Joining with an
+            # empty separator preserves phrases such as "监管问询函".
+            title = " ".join(
+                BeautifulSoup(raw_title, "html.parser")
+                .get_text("", strip=True)
+                .split()
+            )
+            raw_url = str(record.get("adjunctUrl", "")).strip()
+            try:
+                timestamp_ms = int(record.get("announcementTime"))
+                source_timestamp = datetime.fromtimestamp(
+                    timestamp_ms / 1000,
+                    tz=timezone.utc,
+                )
+            except (TypeError, ValueError, OSError, OverflowError):
+                continue
+            if (
+                not title
+                or not raw_url
+                or source_timestamp < since
+                or not _is_focused_cninfo_title(title)
+            ):
+                continue
+            source_day = source_timestamp.astimezone(
+                ZoneInfo("Asia/Shanghai")
+            ).date()
+            published = _source_day_timestamp(
+                source_day.year,
+                source_day.month,
+                source_day.day,
+                "Asia/Shanghai",
+                datetime.now(timezone.utc),
+            )
+            security_name = _clean_text(str(record.get("secName", "")))
+            security_code = _clean_text(str(record.get("secCode", "")))
+            category = (
+                ItemCategory.PUBLIC_COMPANY_AUDIT
+                if any(term in title for term in _CNINFO_AUDITOR_TITLE_TERMS)
+                else ItemCategory.REPORTING_CONTROLS
+            )
+            items.append(
+                ContentItem(
+                    source="巨潮资讯年报问询与审计回复",
+                    category=category,
+                    title=title,
+                    url=urljoin(CNINFO_PDF_BASE_URL, raw_url),
+                    summary=(
+                        f"上市公司公开披露材料：{security_name}"
+                        f"（{security_code}）—{title}"
+                    ),
+                    published_at=published,
+                    metadata={
+                        "api_url": CNINFO_ANNOUNCEMENTS_API,
+                        "security_name": security_name,
+                        "security_code": security_code,
+                        "announcement_id": str(record.get("announcementId", "")),
+                        "source_timestamp": source_timestamp.isoformat(),
+                        "date_precision": "day",
+                    },
+                )
+            )
+
+    # Prefer auditor replies because they contain the audit procedures and
+    # evidence the user is looking for. Keep one document per listed company
+    # and bound PDF downloads before the article-reading stage.
+    ranked = sorted(
+        _unique_by_url(items),
+        key=lambda item: (
+            any(term in item.title for term in _CNINFO_AUDITOR_TITLE_TERMS),
+            item.published_at,
+        ),
+        reverse=True,
+    )
+    selected: list[ContentItem] = []
+    seen_securities: set[str] = set()
+    for item in ranked:
+        security_key = item.metadata.get("security_code") or item.url
+        if security_key in seen_securities:
+            continue
+        seen_securities.add(security_key)
+        selected.append(item)
+        if len(selected) >= 8:
+            break
+    return selected
+
+
+class CNInfoAnnouncementSource(Source):
+    name = "巨潮资讯年报问询与审计回复"
+
+    async def fetch(self, since: datetime) -> list[ContentItem]:
+        local_since = since.astimezone(ZoneInfo("Asia/Shanghai")).date()
+        local_today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+        date_range = f"{local_since.isoformat()}~{local_today.isoformat()}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 audit-regulatory-intel-bot/2.0",
+            "Referer": "https://www.cninfo.com.cn/new/commonUrl?url=disclosure/list/notice",
+            "Origin": "https://www.cninfo.com.cn",
+        }
+
+        async def fetch_term(client: httpx.AsyncClient, term: str) -> dict:
+            response = await client.post(
+                CNINFO_ANNOUNCEMENTS_API,
+                data={
+                    "pageNum": "1",
+                    "pageSize": "30",
+                    "column": "szse",
+                    "tabName": "fulltext",
+                    "plate": "",
+                    "stock": "",
+                    "searchkey": term,
+                    "secid": "",
+                    "category": "",
+                    "trade": "",
+                    "seDate": date_range,
+                    "sortName": "",
+                    "sortType": "",
+                    "isHLtitle": "true",
+                },
+                headers=headers,
+            )
+            response.raise_for_status()
+            return response.json()
+
+        try:
+            async with httpx.AsyncClient(timeout=25, follow_redirects=True) as client:
+                payloads = await asyncio.gather(
+                    *(fetch_term(client, term) for term in _CNINFO_QUERY_TERMS)
+                )
+        except (httpx.HTTPError, ValueError) as exc:
+            raise SourceFetchError(f"CNInfo announcement fetch failed: {exc}") from exc
+        return parse_cninfo_records(payloads, since)
+
+
+def parse_mof_listing(html: str, page_url: str, since: datetime) -> list[ContentItem]:
+    """Parse MOF sanction rows, using page publication dates embedded in URLs."""
+    soup = BeautifulSoup(html, "html.parser")
+    items: list[ContentItem] = []
+    for row in soup.select("table tr"):
+        cells = row.find_all("td")
+        anchor = row.find("a", href=True)
+        if len(cells) < 3 or anchor is None:
+            continue
+        href = anchor["href"].strip()
+        date_match = re.search(r"/t(\d{8})_\d+\.htm", urljoin(page_url, href))
+        if not date_match:
+            continue
+        try:
+            parsed_day = datetime.strptime(date_match.group(1), "%Y%m%d")
+        except ValueError:
+            continue
+        published = _source_day_timestamp(
+            parsed_day.year,
+            parsed_day.month,
+            parsed_day.day,
+            "Asia/Shanghai",
+            datetime.now(timezone.utc),
+        )
+        if published < since:
+            continue
+
+        title = _clean_text(anchor.get_text(" "))
+        script = anchor.find("script")
+        if script is not None:
+            script_match = re.search(
+                r"""var\s+str\s*=\s*["'](?P<title>.*?)["']\s*;""",
+                script.get_text(" ", strip=False),
+                flags=re.DOTALL,
+            )
+            if script_match:
+                title = _clean_text(script_match.group("title"))
+        if not title:
+            title = "财政部行政处罚决定书"
+        items.append(
+            ContentItem(
+                source="财政部行政处罚",
+                title=title[:500],
+                url=urljoin(page_url, href),
+                summary=_clean_text(cells[1].get_text(" ")),
+                published_at=published,
+                metadata={
+                    "listing_url": page_url,
+                    "document_date": _clean_text(cells[2].get_text(" ")),
+                },
+            )
+        )
+    return _unique_by_url(items)
+
+
+class MinistryOfFinanceSanctionsSource(Source):
+    name = "财政部行政处罚"
+
+    def __init__(self, url: str = MOF_SANCTIONS_URL) -> None:
+        self.url = url
+
+    async def fetch(self, since: datetime) -> list[ContentItem]:
+        try:
+            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+                response = await client.get(
+                    self.url,
+                    headers={"User-Agent": "audit-regulatory-intel-bot/2.0"},
+                )
+                response.raise_for_status()
+                items = parse_mof_listing(response.text, self.url, since)
+
+                semaphore = asyncio.Semaphore(ARTICLE_READER_CONCURRENCY)
+
+                async def add_detail(item: ContentItem) -> None:
+                    try:
+                        async with semaphore:
+                            detail = await client.get(
+                                item.url,
+                                headers={"User-Agent": "audit-regulatory-intel-bot/2.0"},
+                            )
+                            detail.raise_for_status()
+                        text = _extract_public_article_text(detail.text, MAX_ARTICLE_CHARS)
+                        if len(text) >= MIN_ARTICLE_CHARS:
+                            item.summary = text[:8_000]
+                            item.article_text = text
+                            item.metadata["article_read_status"] = "provided_by_source"
+                    except httpx.HTTPError as exc:
+                        item.metadata["article_read_status"] = f"unavailable:{type(exc).__name__}"
+
+                await asyncio.gather(*(add_detail(item) for item in items))
+                return items
+        except httpx.HTTPError as exc:
+            raise SourceFetchError(f"MOF sanctions fetch failed: {exc}") from exc
 
 
 class SECListingSource(Source):
@@ -305,7 +936,10 @@ class PCAOBNewsSource(Source):
     async def fetch(self, since: datetime) -> list[ContentItem]:
         try:
             async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-                response = await client.get(self.url, headers={"User-Agent": "commodity-risk-intel-bot/1.0"})
+                response = await client.get(
+                    self.url,
+                    headers={"User-Agent": "audit-regulatory-intel-bot/2.0"},
+                )
                 response.raise_for_status()
         except httpx.HTTPError as exc:
             raise SourceFetchError(f"PCAOB fetch failed: {exc}") from exc
@@ -317,26 +951,89 @@ def parse_pcaob_listing(html: str, page_url: str, since: datetime) -> list[Conte
     now = datetime.now(timezone.utc)
     items: list[ContentItem] = []
     seen: set[str] = set()
-    for anchor in soup.select('a[href*="news-release-detail"]'):
-        title = _clean_text(anchor.get_text(" "))
+
+    # The server-rendered News & Events landing page exposes recent updates
+    # even when the dedicated news-release search widget is unavailable.
+    for card in soup.select(".recent-updates__item"):
+        title_element = card.select_one(".recent-updates__title")
+        anchor = card.select_one('a[href*="news-release-detail"]')
+        date_element = card.select_one(".recent-updates__date")
+        title = _clean_text(title_element.get_text(" ") if title_element else "")
+        if not title or anchor is None:
+            continue
         url = urljoin(page_url, anchor["href"])
-        if not title or url in seen:
+        published = _date_from_context(
+            _clean_text(date_element.get_text(" ") if date_element else ""),
+            now,
+            "America/New_York",
+        )
+        if published is None or published < since or url in seen:
             continue
         seen.add(url)
-        container = anchor.find_parent(["article", "li", "div"])
-        context = _clean_text(container.get_text(" ") if container else title)
-        date_match = re.search(
-            r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},\s+\d{4}",
-            context,
-            flags=re.IGNORECASE,
-        )
-        published = _to_utc(date_match.group(0) if date_match else None, now)
-        if published < since:
-            continue
         items.append(
             ContentItem(
                 source="PCAOB",
-                category=ItemCategory.RISK,
+                category=ItemCategory.OTHER,
+                title=title,
+                url=url,
+                summary=_clean_text(card.get_text(" "))[:2_000],
+                published_at=published,
+                metadata={"listing_url": page_url},
+            )
+        )
+
+    # Retain support for the older server-rendered release listing.
+    for anchor in soup.select('a[href*="news-release-detail"]'):
+        url = urljoin(page_url, anchor["href"])
+        if url in seen:
+            continue
+
+        title = _clean_text(anchor.get_text(" "))
+        context = title
+        date_match = None
+        # PCAOB has served several variants of this page. Walk upward until a
+        # container supplies both the descriptive heading and the date instead
+        # of treating the CTA label ("Read more") as the headline.
+        for container in anchor.parents:
+            if getattr(container, "name", None) not in {"article", "li", "div"}:
+                continue
+            candidate_context = _clean_text(container.get_text(" "))
+            candidate_date = re.search(
+                r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+                r"[a-z]*\.?\s+\d{1,2},\s+\d{4}",
+                candidate_context,
+                flags=re.IGNORECASE,
+            )
+            heading = container.select_one("h2, h3, h4")
+            candidate_title = _clean_text(heading.get_text(" ") if heading else "")
+            if not candidate_title and title.casefold() not in {
+                "read more",
+                "learn more",
+                "view details",
+            }:
+                candidate_title = title
+            if candidate_date and candidate_title:
+                title = candidate_title
+                context = candidate_context
+                date_match = candidate_date
+                break
+
+        # A release without a trustworthy listing date must not be labelled as
+        # current merely because the crawler ran today.
+        if not title or date_match is None:
+            continue
+        published = _date_from_context(
+            date_match.group(0),
+            now,
+            "America/New_York",
+        )
+        if published is None or published < since:
+            continue
+        seen.add(url)
+        items.append(
+            ContentItem(
+                source="PCAOB",
+                category=ItemCategory.OTHER,
                 title=title,
                 url=url,
                 summary=context[:2_000],
@@ -570,24 +1267,40 @@ def _unique_by_url(items: Iterable[ContentItem]) -> list[ContentItem]:
 
 def build_sources(settings: Settings) -> list[Source]:
     sources: list[Source] = [
-        RSSSource("Forbes", FORBES_BUSINESS_RSS),
-        RSSSource("U.S. EIA Today in Energy", EIA_TODAY_IN_ENERGY_RSS),
-        RSSSource("U.S. EIA Press Releases", EIA_PRESS_RELEASES_RSS),
-        RSSSource("Federal Reserve Press Releases", FEDERAL_RESERVE_PRESS_RSS),
-        RSSSource("Bank of Japan", BOJ_WHATS_NEW_RSS),
-        RSSSource("Bank of Korea Press Releases", BOK_PRESS_RELEASES_RSS),
-        RSSSource("BIS Press Releases", BIS_PRESS_RELEASES_RSS),
-        RSSSource("BIS Statistical Releases", BIS_STATISTICAL_RELEASES_RSS),
-        RSSSource("ECB News", ECB_NEWS_RSS),
-        RSSSource("ECB Statistical Releases", ECB_STATISTICAL_RELEASES_RSS),
-        RSSSource("European Banking Authority", EBA_NEWS_RSS),
-        SECListingSource("CFTC Press Releases", CFTC_PRESS_URL, settings.sec_user_agent),
-        SECListingSource("SEC Accounting & Auditing Enforcement", SEC_AAER_URL, settings.sec_user_agent),
-        SECListingSource("SEC Press Releases", SEC_PRESS_URL, settings.sec_user_agent),
+        RSSSource(
+            "SEC Accounting & Auditing Enforcement",
+            SEC_AAER_RSS,
+            ItemCategory.FRAUD_ENFORCEMENT,
+        ),
+        RSSSource("SEC Press Releases", SEC_PRESS_RSS),
+        RSSSource("SEC Litigation Releases", SEC_LITIGATION_RSS),
+        RSSSource("SEC Administrative Proceedings", SEC_ADMIN_PROCEEDINGS_RSS),
         PCAOBNewsSource(),
-        RSSSource("Guardian Business", GUARDIAN_BUSINESS_RSS),
-        RSSSource("WSJ US Business", WSJ_US_BUSINESS_RSS),
-        RSSSource("Yahoo Finance", YAHOO_FINANCE_RSS),
+        DatedListingSource(
+            "UK FRC Audit & Reporting",
+            FRC_AUDIT_ENFORCEMENT_URL,
+            "/news-and-events/news/",
+            date_timezone="Europe/London",
+        ),
+        ThomsonReutersPCAOBSource(),
+        DatedListingSource(
+            "IAASB",
+            IAASB_NEWS_URL,
+            "/news-events/",
+            ItemCategory.PUBLIC_COMPANY_AUDIT,
+            "America/New_York",
+        ),
+        CSRCJSONSource("中国证监会行政处罚", CSRC_PENALTIES_API),
+        CSRCJSONSource("中国证监会要闻", CSRC_NEWS_API),
+        CNInfoAnnouncementSource(),
+        MinistryOfFinanceSanctionsSource(),
+        ASICJSONSource(),
+        DatedListingSource(
+            "AFRC Hong Kong",
+            AFRC_PRESS_RELEASES_URL,
+            "/en-hk/news-centre/press-releases/",
+            date_timezone="Asia/Hong_Kong",
+        ),
     ]
     for name, feed_url in settings.extra_rss_feeds:
         sources.append(RSSSource(name, feed_url))

@@ -12,7 +12,7 @@ from app.ai import (
     OpenAICompatibleBriefGenerator,
     _candidate_payload,
 )
-from app.models import ContentItem, ItemCategory
+from app.models import ContentItem, DeepReadingReport, ItemCategory
 
 
 def _analysis(url: str) -> dict[str, object]:
@@ -30,6 +30,20 @@ def _analysis(url: str) -> dict[str, object]:
         "transmission_or_risk": ["Researchers can monitor whether later inventory data confirms the stated supply change."],
         "limits_and_next_checks": ["Confirm the scale and timing in the linked source and subsequent official data."],
     }
+
+
+def test_report_model_accepts_six_selected_articles() -> None:
+    report = DeepReadingReport.model_validate(
+        {
+            "report_date": "2026-07-17",
+            "analyses": [
+                _analysis(f"https://example.test/article-{index}")
+                for index in range(6)
+            ],
+        }
+    )
+
+    assert len(report.analyses) == 6
 
 
 @pytest.mark.asyncio
@@ -212,7 +226,7 @@ def test_candidate_payload_limits_article_text_length() -> None:
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_generator_sends_only_top_six_readable_candidates(settings) -> None:
+async def test_generator_sends_only_top_ten_readable_candidates(settings) -> None:
     published = datetime(2026, 7, 17, tzinfo=timezone.utc)
     candidates = [
         ContentItem(
@@ -224,11 +238,11 @@ async def test_generator_sends_only_top_six_readable_candidates(settings) -> Non
             published_at=published,
             score=score,
         )
-        for score in range(1, 8)
+        for score in range(1, 13)
     ]
     highest = candidates[-1]
     analyses = []
-    for candidate in candidates[-3:]:
+    for candidate in candidates[-4:]:
         analysis = _analysis(candidate.url)
         analysis["title"] = candidate.title
         analyses.append(analysis)
@@ -243,9 +257,12 @@ async def test_generator_sends_only_top_six_readable_candidates(settings) -> Non
 
     report = await OpenAICompatibleBriefGenerator(settings).generate(date(2026, 7, 17), candidates)
 
-    request_body = route.calls[0].request.content.decode()
-    assert len(report.analyses) == 3
+    request_body = __import__("json").loads(route.calls[0].request.content)
+    prompt = __import__("json").loads(request_body["messages"][1]["content"])
+    input_urls = {entry["url"] for entry in prompt["输入资料"]}
+    assert len(report.analyses) == 4
     assert highest.url in {analysis.url for analysis in report.analyses}
-    assert "https://example.test/oil-1" not in request_body
-    for score in range(2, 8):
-        assert f"https://example.test/oil-{score}" in request_body
+    assert "https://example.test/oil-1" not in input_urls
+    assert "https://example.test/oil-2" not in input_urls
+    for score in range(3, 13):
+        assert f"https://example.test/oil-{score}" in input_urls

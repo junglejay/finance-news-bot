@@ -25,4 +25,5 @@ def settings() -> Settings:
         sec_user_agent="test-bot contact=test@example.com",
         extra_rss_feeds=(),
         extra_article_domains=(),
+        delivery_history_file="",
     )

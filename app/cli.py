@@ -17,7 +17,7 @@ async def _run_once() -> int:
     settings = Settings.from_env()
     outcome = await BriefService(settings).run_once()
     print(json.dumps(outcome.to_dict(), ensure_ascii=False))
-    return 0 if outcome.status == "success" else 1
+    return 0 if outcome.status in {"success", "no_update"} else 1
 
 
 def _run_simulate(extra_args: list[str]) -> int:
@@ -48,7 +48,7 @@ def main() -> int:
         return _run_simulate(argv[1:])
 
     parser = argparse.ArgumentParser(
-        description="Commodity and risk intelligence bot automation commands"
+        description="Financial fraud, enforcement, and public-company audit monitoring"
     )
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("run-once", help="执行一次完整生产任务（抓取->AI->钉钉）")

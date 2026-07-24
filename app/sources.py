@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import email
 import imaplib
+import io
 import logging
 import re
 from abc import ABC, abstractmethod
@@ -45,6 +46,7 @@ from .rules import (
     SEC_PRESS_URL,
     GUARDIAN_BUSINESS_RSS,
     WSJ_US_BUSINESS_RSS,
+    YAHOO_FINANCE_RSS,
 )
 
 
@@ -164,17 +166,34 @@ class PublicArticleReader:
             return
         try:
             async with semaphore:
-                response = await client.get(
-                    item.url,
-                    headers={"User-Agent": "commodity-risk-intel-bot/1.0", "Accept": "text/html,application/xhtml+xml"},
-                )
-                response.raise_for_status()
+                # Public pages (notably the Guardian) occasionally drop the TLS
+                # tunnel mid-handshake, so retry transient connection failures
+                # before giving up on a readable article.
+                last_http_error: httpx.HTTPError | None = None
+                for attempt in range(1, 4):
+                    try:
+                        response = await client.get(
+                            item.url,
+                            headers={"User-Agent": "commodity-risk-intel-bot/1.0", "Accept": "text/html,application/xhtml+xml"},
+                        )
+                        response.raise_for_status()
+                        break
+                    except httpx.HTTPError as exc:
+                        last_http_error = exc
+                        if attempt < 3:
+                            await asyncio.sleep(0.5 * attempt)
+                else:
+                    assert last_http_error is not None
+                    raise last_http_error
             content_type = response.headers.get("content-type", "").lower()
-            if "html" not in content_type:
+            if "pdf" in content_type or item.url.lower().endswith(".pdf"):
+                article_text = _extract_pdf_text(response.content, self.max_characters)
+            elif "html" in content_type:
+                article_text = _extract_public_article_text(response.text, self.max_characters)
+            else:
                 item.metadata["article_read_status"] = "skipped_non_html"
                 logger.debug(f"Skipping {item.source} - non-HTML content type: {content_type}")
                 return
-            article_text = _extract_public_article_text(response.text, self.max_characters)
             if len(article_text) < MIN_ARTICLE_CHARS:
                 item.metadata["article_read_status"] = f"insufficient_text_{len(article_text)}_chars"
                 logger.debug(f"Skipping {item.source} '{item.title[:50]}' - insufficient text: {len(article_text)} chars")
@@ -210,6 +229,24 @@ def _extract_public_article_text(html: str, max_characters: int) -> str:
             continue
         blocks.append(text)
     return "\n".join(blocks)[:max_characters]
+
+
+def _extract_pdf_text(content: bytes, max_characters: int) -> str:
+    """Extract plain text from a public PDF such as an SEC litigation order.
+
+    pypdf is imported lazily so the HTML path keeps working even if the package
+    is absent. Scanned/image-only PDFs yield little or no text and are naturally
+    filtered out by the caller's minimum-length check.
+    """
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(content))
+        blocks = [(page.extract_text() or "") for page in reader.pages]
+    except Exception as exc:  # encrypted/malformed PDFs must not break the run
+        logger.debug(f"PDF text extraction failed: {exc}")
+        return ""
+    return " ".join("\n".join(blocks).split())[:max_characters]
 
 
 class SECListingSource(Source):
@@ -550,6 +587,7 @@ def build_sources(settings: Settings) -> list[Source]:
         PCAOBNewsSource(),
         RSSSource("Guardian Business", GUARDIAN_BUSINESS_RSS),
         RSSSource("WSJ US Business", WSJ_US_BUSINESS_RSS),
+        RSSSource("Yahoo Finance", YAHOO_FINANCE_RSS),
     ]
     for name, feed_url in settings.extra_rss_feeds:
         sources.append(RSSSource(name, feed_url))

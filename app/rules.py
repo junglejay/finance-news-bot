@@ -35,6 +35,7 @@ SEC_PRESS_URL = "https://www.sec.gov/newsroom/press-releases?month=All&year=All"
 PCAOB_NEWS_URL = "https://pcaobus.org/news-events/news-releases"
 GUARDIAN_BUSINESS_RSS = "https://www.theguardian.com/business/rss"
 WSJ_US_BUSINESS_RSS = "https://feeds.a.dj.com/rss/WSJcomUSBusiness.xml"
+YAHOO_FINANCE_RSS = "https://finance.yahoo.com/news/rssindex"
 
 # Full text is read only from public pages operated by these sources.  In
 # particular, FT and Scholar links are never fetched, even if a feed provides
@@ -53,6 +54,7 @@ PUBLIC_ARTICLE_DOMAINS = {
     "cftc.gov",
     "federalreserve.gov",
     "theguardian.com",
+    "finance.yahoo.com",
 }
 FULL_TEXT_BLOCKED_SOURCES = {"Financial Times", "Google Scholar Alert"}
 HTTPS_UPGRADE_HOSTS = {"www.boj.or.jp"}

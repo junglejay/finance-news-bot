@@ -76,8 +76,8 @@ class Settings:
         return cls(
             timezone=_value("TIMEZONE", "Asia/Shanghai"),
             ai_api_key=_value("AI_API_KEY"),
-            ai_base_url=_value("AI_BASE_URL", "https://minitoken.top/v1").rstrip("/"),
-            ai_model=_value("AI_MODEL", "deepseek-v4-flash"),
+            ai_base_url=_value("AI_BASE_URL", "https://open.bigmodel.cn/api/anthropic").rstrip("/"),
+            ai_model=_value("AI_MODEL", "glm-5.3"),
             dingtalk_webhook=_value("DINGTALK_WEBHOOK"),
             dingtalk_secret=_value("DINGTALK_SECRET"),
             ft_feed_url=_value("FT_FEED_URL"),

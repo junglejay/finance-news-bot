@@ -6,7 +6,7 @@ from app.config import Settings
 def test_anthropic_configuration_takes_precedence(monkeypatch) -> None:
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "anthropic-test-token")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://open.bigmodel.cn/api/anthropic/")
-    monkeypatch.setenv("ANTHROPIC_MODEL", "glm-5.2")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "glm-5.3")
     monkeypatch.setenv("AI_API_KEY", "old-test-key")
     monkeypatch.setenv("AI_BASE_URL", "https://old.example/v1")
     monkeypatch.setenv("AI_MODEL", "old-model")
@@ -16,7 +16,7 @@ def test_anthropic_configuration_takes_precedence(monkeypatch) -> None:
     assert settings.ai_protocol == "anthropic"
     assert settings.ai_api_key == "anthropic-test-token"
     assert settings.ai_base_url == "https://open.bigmodel.cn/api/anthropic"
-    assert settings.ai_model == "glm-5.2"
+    assert settings.ai_model == "glm-5.3"
 
 
 def test_anthropic_token_uses_bigmodel_defaults(monkeypatch) -> None:
@@ -28,7 +28,7 @@ def test_anthropic_token_uses_bigmodel_defaults(monkeypatch) -> None:
 
     assert settings.ai_protocol == "anthropic"
     assert settings.ai_base_url == "https://open.bigmodel.cn/api/anthropic"
-    assert settings.ai_model == "glm-5.2"
+    assert settings.ai_model == "glm-5.3"
 
 
 def test_legacy_openai_configuration_remains_supported(monkeypatch) -> None:

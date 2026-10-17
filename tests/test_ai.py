@@ -43,7 +43,7 @@ def anthropic_settings(settings):
         ai_protocol="anthropic",
         ai_api_key="anthropic-test-token",
         ai_base_url="https://open.bigmodel.cn/api/anthropic",
-        ai_model="glm-5.2",
+        ai_model="glm-5.3",
     )
 
 
@@ -89,7 +89,7 @@ async def test_anthropic_messages_protocol_and_text_blocks(
     assert request.headers["authorization"] == "Bearer anthropic-test-token"
     assert request.headers["anthropic-version"] == "2023-06-01"
     body = json.loads(request.content)
-    assert body["model"] == "glm-5.2"
+    assert body["model"] == "glm-5.3"
     assert body["max_tokens"] >= 8_192
     assert body["system"] == SYSTEM_PROMPT
     assert [message["role"] for message in body["messages"]] == ["user"]

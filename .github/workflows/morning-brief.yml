@@ -21,7 +21,7 @@ jobs:
       TIMEZONE: Asia/Shanghai
       ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
       ANTHROPIC_BASE_URL: ${{ vars.ANTHROPIC_BASE_URL || 'https://open.bigmodel.cn/api/anthropic' }}
-      ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || 'glm-5.2' }}
+      ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || 'glm-5.3' }}
       DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
       SCHOLAR_IMAP_HOST: ${{ secrets.SCHOLAR_IMAP_HOST }}
       SCHOLAR_IMAP_PORT: ${{ secrets.SCHOLAR_IMAP_PORT }}

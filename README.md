@@ -7,7 +7,7 @@
 3. 财务报告、内部控制和非标准审计意见；
 4. 与上述主题直接相关的专业研究。
 
-系统优先采集监管机构和审计准则制定机构的一手公开材料，读取可公开访问的正文，经确定性规则筛选后，再使用智谱 GLM-5.2（Anthropic 兼容 Messages API）生成逐篇中文深度解读并推送到钉钉。
+系统优先采集监管机构和审计准则制定机构的一手公开材料，读取可公开访问的正文，经确定性规则筛选后，再使用智谱 GLM-5.3（Anthropic 兼容 Messages API）生成逐篇中文深度解读并推送到钉钉。
 
 每次运行不保存原文或 AI 报告。抓取窗口默认为最近 24 小时，并通过 GitHub
 Actions 缓存仅保存“已成功推送的 URL 和时间”及内地新闻当日配额标记，避免手动重跑或来源时间重叠导致重复推送，并确保同一天重跑也不会发送第二篇内地新闻。
@@ -98,7 +98,7 @@ AI 返回必须通过 Pydantic Schema、来源链接、标题、日期和正文�
 | `FT_EMAIL_SENDER` | 否 | 同一 IMAP 邮箱中 FT 官方通讯的发件人 |
 
 `ANTHROPIC_BASE_URL` 默认为 `https://open.bigmodel.cn/api/anthropic`，
-`ANTHROPIC_MODEL` 默认为 `glm-5.2`。本地模拟通过 `.env` 配置，Actions 通过同名
+`ANTHROPIC_MODEL` 默认为 `glm-5.3`。本地模拟通过 `.env` 配置，Actions 通过同名
 repository variables 覆盖地址和模型，通过 Secret `ANTHROPIC_AUTH_TOKEN` 提供密钥。
 修改本地 `.env` 不会自动更新 GitHub Secrets。
 

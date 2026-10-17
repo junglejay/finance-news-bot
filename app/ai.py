@@ -205,6 +205,8 @@ class DeepReadingGenerator:
                         f"AI gateway must return between {min_analyses} and {max_analyses} analyses"
                     )
                 _validate_source_references(report, readable_candidates)
+                if any(analysis.dingtalk_brief is None for analysis in report.analyses):
+                    raise ReportGenerationError("AI gateway omitted the required dingtalk_brief")
                 return report
             except (
                 APIConnectionError,

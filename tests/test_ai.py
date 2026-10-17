@@ -33,6 +33,13 @@ def _analysis(url: str) -> dict[str, object]:
         ),
         "transmission_or_risk": ["Researchers can monitor whether later inventory data confirms the stated supply change."],
         "limits_and_next_checks": ["Confirm the scale and timing in the linked source and subsequent official data."],
+        "dingtalk_brief": {
+            "headline": "原油供应：公开报道披露供应背景变化",
+            "summary": "报道介绍原油供应背景变化，尚不能据此判断价格走向。",
+            "facts": ["来源披露了原油供应的最新情况。"],
+            "reading": "供给变化可能影响市场判断，仍需后续数据验证。",
+            "next_check": "核对原文及后续库存数据披露的规模和时间。",
+        },
     }
 
 
@@ -100,6 +107,25 @@ async def test_anthropic_messages_protocol_and_text_blocks(
     assert "response_format" not in body
     prompt = json.loads(body["messages"][0]["content"])
     assert prompt["输入资料"][0]["article_text"] == readable_candidate.article_text
+    assert "dingtalk_brief" in prompt["目标 JSON"]["analyses"][0]
+    assert report.analyses[0].dingtalk_brief.headline.startswith("原油供应")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_brief", [None, {"headline": "English filing title"}])
+async def test_generator_rejects_missing_or_invalid_short_brief(
+    anthropic_settings, readable_candidate, monkeypatch, invalid_brief
+) -> None:
+    analysis = _analysis(readable_candidate.url)
+    analysis["dingtalk_brief"] = invalid_brief
+
+    async def response_without_valid_brief(prompt):
+        return json.dumps({"report_date": "2026-07-17", "analyses": [analysis]})
+
+    generator = DeepReadingGenerator(anthropic_settings, attempts=1)
+    monkeypatch.setattr(generator, "_request_content", response_without_valid_brief)
+    with pytest.raises(BriefGenerationError, match="dingtalk_brief"):
+        await generator.generate(date(2026, 7, 17), [readable_candidate])
 
 
 @pytest.mark.asyncio

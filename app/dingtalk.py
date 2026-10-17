@@ -46,6 +46,47 @@ class DeliveryResult:
     response: dict
 
 
+@dataclass(frozen=True, slots=True)
+class DingTalkMessage:
+    title: str
+    text: str
+
+
+def build_report_messages(report: DeepReadingReport) -> list[DingTalkMessage]:
+    """Build exactly the same short messages for delivery and local preview.
+
+    Validate the entire batch before sending so a missing brief never causes a
+    partial batch or silently falls back to the lengthy research report.
+    """
+    messages: list[DingTalkMessage] = []
+    total = len(report.analyses)
+    for index, analysis in enumerate(report.analyses, start=1):
+        brief = analysis.dingtalk_brief
+        if brief is None:
+            raise DingTalkDeliveryError(f"Article {index} is missing dingtalk_brief")
+        lines = [
+            f"### {DEFAULT_KEYWORD}｜{brief.headline}",
+            "",
+            f"**一句话：**{brief.summary}",
+            "",
+            "**关键事实**",
+            *(f"- {fact}" for fact in brief.facts),
+            "",
+            f"**解读：**{brief.reading}",
+            "",
+            f"**后续核验：**{brief.next_check}",
+            "",
+            f"{analysis.source}｜{analysis.published_at.date().isoformat()}｜{index}/{total}｜[原文]({analysis.url})",
+            "",
+            report.disclaimer,
+        ]
+        messages.append(DingTalkMessage(
+            title=f"{brief.headline}｜{report.report_date.isoformat()} {index}/{total}",
+            text="\n".join(lines),
+        ))
+    return messages
+
+
 def ensure_keyword_in_message(content: str, keyword: str = DEFAULT_KEYWORD) -> str:
     """Ensure the DingTalk keyword is present in the message text/body.
 
@@ -62,11 +103,9 @@ class DingTalkNotifier:
         self.secret = settings.dingtalk_secret
 
     async def send_report(self, report: DeepReadingReport) -> list[DeliveryResult]:
-        total = len(report.analyses)
         results: list[DeliveryResult] = []
-        for index, analysis in enumerate(report.analyses, start=1):
-            title = f"财务造假与上市公司审计（{report.report_date.isoformat()}）{index}/{total}"
-            results.append(await self.send_markdown(title, report.article_to_markdown(analysis)))
+        for message in build_report_messages(report):
+            results.append(await self.send_markdown(message.title, message.text))
         return results
 
     async def send_fault(self, message: str) -> DeliveryResult:
@@ -82,8 +121,7 @@ class DingTalkNotifier:
         return await self.send_markdown("财务造假与上市公司审计：暂无高相关更新", text)
 
     async def send_markdown(self, title: str, markdown: str) -> DeliveryResult:
-        # Ensure the required keyword is present so keyword-based robots accept the message
-        # Place it at the very beginning, before any Markdown formatting
+        # Short-report headings already include the robot's required keyword.
         markdown = ensure_keyword_in_message(markdown, DEFAULT_KEYWORD)
 
         if not self.webhook:

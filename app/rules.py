@@ -496,9 +496,16 @@ AI_OUTPUT_SCHEMA_TEMPLATE = {
     "detailed_reading": "2 至 4 个自然段，解释造假或错报机制、关键审计程序、监管逻辑、责任边界及其意义",
     "transmission_or_risk": ["给出 1 至 4 条对财报使用者、审计委员会、审计机构或监管实践的观察"],
     "limits_and_next_checks": ["指出尚未终局、证据缺口、申辩情况或后续需要核验的文件"],
+    "dingtalk_brief": {
+        "headline": "36字以内的中文事件标题，主体+关键变化；保留公司名称，不能照搬英文申报标题",
+        "summary": "70字以内的一句话结论，交代发生了什么及当前程序阶段",
+        "facts": ["1至3条关键事实，每条不超过65字，优先保留期间、金额、比例或处理结果"],
+        "reading": "100字以内的单段解读，说明为何值得关注；推演用可能、需关注等措辞",
+        "next_check": "70字以内的后续核验，合并最重要的1至2个待查事项；未披露的信息明确标注",
+    },
 }
 
-AI_TASK_DESCRIPTION = "从候选中选择最有事实密度和专业价值的财务造假、监管执法或上市公司审计材料，输出 1 至 6 篇深度解读。"
+AI_TASK_DESCRIPTION = "从候选中选择最有事实密度和专业价值的财务造假、监管执法或上市公司审计材料，输出 1 至 6 篇深度解读，每篇同时提供独立撰写的钉钉中文短报 dingtalk_brief。"
 
 AI_RULES = [
     "analyses 只能选择 full_text_available=true 且 category 属于 fraud_enforcement、public_company_audit、reporting_controls 或 research 的输入条目。",
@@ -509,5 +516,8 @@ AI_RULES = [
     "涉及审计时优先识别被审计主体与期间、审计意见、关键错报、失效审计程序、审计师责任及处罚结果；正文没有的信息应明确说未披露。",
     "fact_chain 只能包含输入正文或来源摘要能够支持的事实，不得把不同文章的事实合并。",
     "detailed_reading 应解释会计处理或审计逻辑，不能退化为快讯、市场行情评论或泛泛风险提示。",
+    "每篇必须包含 dingtalk_brief，全部使用简体中文（公司名、缩写可保留英文），字段只写纯文本，不写 Markdown、换行、来源或链接。",
+    "dingtalk_brief 与完整解读必须依据同一篇输入材料且事实一致；不能增加新事实，也不能直接截断长段落。优先用短句，避免术语堆叠和重复背景，不为凑字数补充信息。",
+    "短报严格遵守各字段字数上限（含标点）：headline 36、summary 70、每条 facts 65（最多3条）、reading 100、next_check 70。保留关键数字、单位、否定词及调查/指控/决定/待批准等程序阶段，不能为了缩短而改变含义。",
     "Financial Times 和 Google Scholar Alert 在未获得公开全文时不能进入输出。",
 ]

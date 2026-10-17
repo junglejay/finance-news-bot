@@ -6,9 +6,9 @@ import hashlib
 import json
 from datetime import date, datetime, timezone
 from enum import StrEnum
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, StringConstraints, field_validator
 
 
 class ItemCategory(StrEnum):
@@ -59,6 +59,37 @@ class ContentItem(BaseModel):
         return hashlib.sha256(self.url.strip().lower().encode("utf-8")).hexdigest()
 
 
+class DingTalkBrief(BaseModel):
+    """A separately written mobile brief; never a clipped research paragraph."""
+
+    headline: str = Field(min_length=1, max_length=36)
+    summary: str = Field(min_length=1, max_length=70)
+    facts: list[Annotated[str, StringConstraints(min_length=1, max_length=65)]] = Field(
+        min_length=1, max_length=3
+    )
+    reading: str = Field(min_length=1, max_length=100)
+    next_check: str = Field(min_length=1, max_length=70)
+
+    @field_validator("headline", "summary", "reading", "next_check", mode="before")
+    @classmethod
+    def single_line(cls, value: Any) -> Any:
+        return " ".join(value.split()) if isinstance(value, str) else value
+
+    @field_validator("facts", mode="before")
+    @classmethod
+    def single_line_facts(cls, values: Any) -> Any:
+        if isinstance(values, list):
+            return [cls.single_line(value) for value in values]
+        return values
+
+    @field_validator("headline")
+    @classmethod
+    def chinese_headline(cls, value: str) -> str:
+        if not any("\u4e00" <= char <= "\u9fff" for char in value):
+            raise ValueError("DingTalk headline must describe the event in Chinese")
+        return value
+
+
 class ArticleAnalysis(BaseModel):
     """A traceable, detailed interpretation of one original article."""
 
@@ -71,6 +102,8 @@ class ArticleAnalysis(BaseModel):
     detailed_reading: str = Field(min_length=80, max_length=4_000)
     transmission_or_risk: list[str] = Field(min_length=1, max_length=4)
     limits_and_next_checks: list[str] = Field(default_factory=list, max_length=4)
+    # Legacy reports remain readable; newly generated/delivered reports require this.
+    dingtalk_brief: DingTalkBrief | None = None
 
     @field_validator("published_at")
     @classmethod
@@ -110,7 +143,7 @@ class DeepReadingReport(BaseModel):
         return "\n".join(lines)
 
     def article_to_markdown(self, analysis: ArticleAnalysis) -> str:
-        """Render a single analysis as its own delivery message."""
+        """Render one full analysis for research/export, rather than mobile delivery."""
         return self.model_copy(update={"analyses": [analysis]}).to_markdown()
 
     def to_json(self) -> str:

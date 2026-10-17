@@ -30,7 +30,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app.ai import DeepReadingGenerator
 from app.config import Settings
-from app.models import ContentItem
+from app.dingtalk import build_report_messages
+from app.models import ContentItem, DeepReadingReport
 from app.rules import (
     DEFAULT_WINDOW_HOURS,
     MAX_AI_INPUT_CANDIDATES,
@@ -96,6 +97,14 @@ async def _fetch_source(source: Source, since: datetime) -> tuple[str, list[Cont
         return source.name, items, None
     except Exception as exc:
         return source.name, [], _format_error(exc)
+
+
+def _print_delivery_preview(report: DeepReadingReport) -> None:
+    for index, message in enumerate(build_report_messages(report), 1):
+        print(f"\n---------- 第 {index}/{len(report.analyses)} 篇 ----------")
+        print(f"通知标题: {message.title}")
+        print("\n[钉钉将发送的 markdown 内容]")
+        print(message.text)
 
 
 async def amain(args: argparse.Namespace) -> int:
@@ -254,13 +263,7 @@ async def amain(args: argparse.Namespace) -> int:
             for idx, analysis in enumerate(report.analyses, 1)
         ],
     )
-    for idx, analysis in enumerate(report.analyses, 1):
-        print(f"\n---------- 第 {idx}/{len(report.analyses)} 篇 ----------")
-        print(f"标题: {analysis.title}")
-        print(f"来源: {analysis.source}   日期: {analysis.published_at.date().isoformat()}")
-        print(f"链接: {analysis.url}")
-        print("\n[钉钉将发送的 markdown 内容]")
-        print(report.article_to_markdown(analysis))
+    _print_delivery_preview(report)
 
     # --- 漏斗汇总 ---
     print(f"\n{_bar()}")

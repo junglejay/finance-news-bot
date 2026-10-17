@@ -7,6 +7,7 @@ import json
 import re
 from datetime import date
 from typing import Protocol
+from urllib.parse import urlsplit
 
 import httpx
 from openai import APIConnectionError, APIError, APIStatusError, AsyncOpenAI
@@ -123,27 +124,39 @@ class DeepReadingGenerator:
         if self.settings.ai_protocol == "anthropic":
             base_url = self.settings.ai_base_url.rstrip("/")
             endpoint = f"{base_url}/messages" if base_url.endswith("/v1") else f"{base_url}/v1/messages"
+            headers = {
+                "Authorization": f"Bearer {self.settings.ai_api_key}",
+                "anthropic-version": "2023-06-01",
+            }
+            payload = {
+                "model": self.settings.ai_model,
+                "max_tokens": 16_384,
+                "temperature": 0.2,
+                "system": SYSTEM_PROMPT,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+            if urlsplit(base_url).hostname == "api.deepseek.com":
+                # [1m] is a client context hint; DeepSeek's API model ID has no suffix.
+                payload["model"] = self.settings.ai_model.removesuffix("[1m]")
+                payload["max_tokens"] = 32_768
+                payload["output_config"] = {"effort": "low"}
+                headers["x-api-key"] = self.settings.ai_api_key
             async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=20)) as client:
                 response = await client.post(
                     endpoint,
-                    headers={
-                        "Authorization": f"Bearer {self.settings.ai_api_key}",
-                        "anthropic-version": "2023-06-01",
-                    },
-                    json={
-                        "model": self.settings.ai_model,
-                        "max_tokens": 16_384,
-                        "temperature": 0.2,
-                        "system": SYSTEM_PROMPT,
-                        "messages": [{"role": "user", "content": prompt}],
-                    },
+                    headers=headers,
+                    json=payload,
                 )
             if response.is_error:
                 detail = response.text.replace(self.settings.ai_api_key, "[REDACTED]")[:1_000]
                 raise ReportGenerationError(f"Anthropic gateway HTTP {response.status_code}: {detail}")
             data = response.json()
             if data.get("stop_reason") == "max_tokens":
-                raise ReportGenerationError("Anthropic gateway response exceeded max_tokens")
+                output_tokens = data.get("usage", {}).get("output_tokens", "unknown")
+                raise ReportGenerationError(
+                    f"Anthropic gateway response exceeded max_tokens "
+                    f"(limit={payload['max_tokens']}, output_tokens={output_tokens})"
+                )
             # Thinking and tool-use blocks are not part of the JSON report.
             return "".join(block["text"] for block in data["content"] if block.get("type") == "text")
 

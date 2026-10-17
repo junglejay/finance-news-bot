@@ -7,7 +7,7 @@
 3. 财务报告、内部控制和非标准审计意见；
 4. 与上述主题直接相关的专业研究。
 
-系统优先采集监管机构和审计准则制定机构的一手公开材料，读取可公开访问的正文，经确定性规则筛选后，再使用智谱 GLM-5.3（Anthropic 兼容 Messages API）生成逐篇中文深度解读并推送到钉钉。
+系统优先采集监管机构和审计准则制定机构的一手公开材料，读取可公开访问的正文，经确定性规则筛选后，再使用 DeepSeek Flash（Anthropic 兼容 Messages API，1M 上下文）生成逐篇中文深度解读并推送到钉钉。
 
 每次运行不保存原文或 AI 报告。抓取窗口默认为最近 24 小时，并通过 GitHub
 Actions 缓存仅保存“已成功推送的 URL 和时间”及内地新闻当日配额标记，避免手动重跑或来源时间重叠导致重复推送，并确保同一天重跑也不会发送第二篇内地新闻。
@@ -87,7 +87,7 @@ AI 返回必须通过 Pydantic Schema、来源链接、标题、日期和正文�
 
 | Secret | 必填 | 用途 |
 | --- | --- | --- |
-| `ANTHROPIC_AUTH_TOKEN` | 是 | 智谱 API 密钥，仅保存在本地 `.env` 或 Actions Secret 中 |
+| `ANTHROPIC_AUTH_TOKEN` | 是 | DeepSeek API 密钥，仅保存在本地 `.env` 或 Actions Secret 中 |
 | `DINGTALK_WEBHOOK` | 否 | 钉钉机器人 Webhook；留空时打印到 Actions 日志 |
 | `DINGTALK_SECRET` | 否 | 钉钉机器人启用“加签”时需要 |
 | `SEC_USER_AGENT` | 建议 | 含联系邮箱的 SEC 请求标识，例如 `audit-bot/2.0 contact=you@example.com` |
@@ -97,10 +97,19 @@ AI 返回必须通过 Pydantic Schema、来源链接、标题、日期和正文�
 | `FT_FEED_URL` | 否 | 合法授权的 FT RSS 地址 |
 | `FT_EMAIL_SENDER` | 否 | 同一 IMAP 邮箱中 FT 官方通讯的发件人 |
 
-`ANTHROPIC_BASE_URL` 默认为 `https://open.bigmodel.cn/api/anthropic`，
-`ANTHROPIC_MODEL` 默认为 `glm-5.3`。本地模拟通过 `.env` 配置，Actions 通过同名
+`ANTHROPIC_BASE_URL` 默认为 `https://api.deepseek.com/anthropic`，
+`ANTHROPIC_MODEL` 默认为 `deepseek-flash[1m]`。本地模拟通过 `.env` 配置，Actions 通过同名
 repository variables 覆盖地址和模型，通过 Secret `ANTHROPIC_AUTH_TOKEN` 提供密钥。
 修改本地 `.env` 不会自动更新 GitHub Secrets。
+
+DeepSeek 的 `[1m]` 后缀作为客户端上下文提示保存在配置中，直接请求 API 时使用模型 ID
+`deepseek-flash`；该模型支持 1M 上下文。请求同时提供官方支持的 `x-api-key` 认证头。
+DeepSeek 报告生成使用 32,768 token 的输出预算和 `output_config.effort=low`，
+降低长报告因思考占用预算而截断的风险；截断错误会包含预算和实际输出 token 数。
+切换服务商时必须同步更换 API 密钥；如果 Actions 中已有同名 repository variables，
+也要将它们更新为上述新地址和模型。
+
+接口说明：[DeepSeek Anthropic API](https://api-docs.deepseek.com/guides/anthropic_api/)。
 
 代码仍兼容旧的 `AI_API_KEY`、`AI_BASE_URL`、`AI_MODEL`；使用 OpenAI 兼容网关时，
 移除 `ANTHROPIC_*` 配置并显式设置对应 `AI_*` 值。存在 `ANTHROPIC_*` 配置时优先使用

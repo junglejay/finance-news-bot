@@ -42,8 +42,8 @@ def anthropic_settings(settings):
         settings,
         ai_protocol="anthropic",
         ai_api_key="anthropic-test-token",
-        ai_base_url="https://open.bigmodel.cn/api/anthropic",
-        ai_model="glm-5.3",
+        ai_base_url="https://api.deepseek.com/anthropic",
+        ai_model="deepseek-flash[1m]",
     )
 
 
@@ -60,16 +60,18 @@ def readable_candidate() -> ContentItem:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("versioned_base", [False, True])
+@pytest.mark.parametrize("model", ["deepseek-flash[1m]", "deepseek-flash"])
 @respx.mock
 async def test_anthropic_messages_protocol_and_text_blocks(
-    anthropic_settings, readable_candidate, versioned_base
+    anthropic_settings, readable_candidate, versioned_base, model
 ) -> None:
+    anthropic_settings = replace(anthropic_settings, ai_model=model)
     if versioned_base:
         anthropic_settings = replace(anthropic_settings, ai_base_url=anthropic_settings.ai_base_url + "/v1")
     report_json = json.dumps(
         {"report_date": "2026-07-17", "analyses": [_analysis(readable_candidate.url)]}
     )
-    route = respx.post("https://open.bigmodel.cn/api/anthropic/v1/messages").mock(
+    route = respx.post("https://api.deepseek.com/anthropic/v1/messages").mock(
         return_value=Response(200, json={
             "content": [
                 {"type": "thinking", "thinking": "This is not part of the report."},
@@ -87,10 +89,12 @@ async def test_anthropic_messages_protocol_and_text_blocks(
     assert len(report.analyses) == 1
     request = route.calls[0].request
     assert request.headers["authorization"] == "Bearer anthropic-test-token"
+    assert request.headers["x-api-key"] == "anthropic-test-token"
     assert request.headers["anthropic-version"] == "2023-06-01"
     body = json.loads(request.content)
-    assert body["model"] == "glm-5.3"
-    assert body["max_tokens"] >= 8_192
+    assert body["model"] == "deepseek-flash"
+    assert body["max_tokens"] == 32_768
+    assert body["output_config"] == {"effort": "low"}
     assert body["system"] == SYSTEM_PROMPT
     assert [message["role"] for message in body["messages"]] == ["user"]
     assert "response_format" not in body
@@ -100,8 +104,39 @@ async def test_anthropic_messages_protocol_and_text_blocks(
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_other_anthropic_gateways_keep_their_model_and_request_parameters(anthropic_settings) -> None:
+    settings = replace(anthropic_settings, ai_base_url="https://gateway.example/anthropic", ai_model="custom-model[1m]")
+    route = respx.post("https://gateway.example/anthropic/v1/messages").respond(
+        200, json={"content": [{"type": "text", "text": "{}"}], "stop_reason": "end_turn"}
+    )
+
+    assert await DeepReadingGenerator(settings)._request_content("{}") == "{}"
+
+    request = route.calls[0].request
+    body = json.loads(request.content)
+    assert body["model"] == "custom-model[1m]"
+    assert body["max_tokens"] == 16_384
+    assert "output_config" not in body
+    assert "x-api-key" not in request.headers
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_deepseek_truncation_error_includes_token_usage(anthropic_settings) -> None:
+    respx.post("https://api.deepseek.com/anthropic/v1/messages").respond(200, json={
+        "content": [{"type": "text", "text": "incomplete"}],
+        "stop_reason": "max_tokens",
+        "usage": {"output_tokens": 32_768},
+    })
+
+    with pytest.raises(BriefGenerationError, match="limit=32768, output_tokens=32768"):
+        await DeepReadingGenerator(anthropic_settings)._request_content("{}")
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_anthropic_retries_http_error(anthropic_settings, readable_candidate) -> None:
-    route = respx.post("https://open.bigmodel.cn/api/anthropic/v1/messages").mock(
+    route = respx.post("https://api.deepseek.com/anthropic/v1/messages").mock(
         side_effect=[
             Response(429, json={"error": {"message": "rate limited"}}),
             Response(200, json={"content": [{"type": "text", "text": json.dumps({
@@ -134,7 +169,7 @@ async def test_anthropic_failures_are_reported(anthropic_settings, readable_cand
             "stop_reason": "max_tokens" if failure == "truncated" else "end_turn",
         })
         expected = "unknown URL" if failure == "unknown_url" else "max_tokens"
-    respx.post("https://open.bigmodel.cn/api/anthropic/v1/messages").mock(return_value=response)
+    respx.post("https://api.deepseek.com/anthropic/v1/messages").mock(return_value=response)
 
     with pytest.raises(BriefGenerationError, match=expected) as error:
         await DeepReadingGenerator(anthropic_settings, attempts=1).generate(

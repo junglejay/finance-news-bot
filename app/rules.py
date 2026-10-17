@@ -19,13 +19,15 @@ SEC_CURRENT_8K_ATOM = (
     "?action=getcurrent&type=8-k&company=&dateb=&owner=include"
     "&start=0&count=100&output=atom"
 )
-PCAOB_NEWS_URL = "https://pcaobus.org/news-events"
+PCAOB_NEWS_URL = "https://pcaobus.org/news-events/news-releases"
+PCAOB_NEWS_SEARCH_API = "https://pcaob.searchapi-na.hawksearch.com/api/v2/search/"
 # The unfiltered listing is intentional: FRC publishes audit inspection and
 # enforcement reviews under "Publications", not only under its investigation
 # tag. Compound topic scoring still rejects actuarial/stewardship news.
 FRC_AUDIT_ENFORCEMENT_URL = "https://www.frc.org.uk/news-and-events/news/"
 IAASB_NEWS_URL = "https://www.iaasb.org/news"
-ASIC_MEDIA_RELEASES_API = "https://www.asic.gov.au/_data/mr2023/"
+ASIC_MEDIA_RELEASES_API = "https://download.asic.gov.au/asic-nga/data/newsroom/newsroom-mr-latest.json"
+ASIC_NEWSROOM_FALLBACK_API = "https://download.asic.gov.au/asic-nga/data/newsroom/newsroom-latest.json"
 AFRC_PRESS_RELEASES_URL = "https://www.afrc.org.hk/en-hk/news-centre/press-releases/"
 THOMSON_REUTERS_PCAOB_URL = "https://tax.thomsonreuters.com/news/topic/pcaob/"
 HKEX_TITLE_SEARCH_URL = "https://www1.hkexnews.hk/search/titleSearchServlet.do"

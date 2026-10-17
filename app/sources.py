@@ -28,6 +28,7 @@ from .rules import (
     AFRC_PRESS_RELEASES_URL,
     ARTICLE_READER_CONCURRENCY,
     ASIC_MEDIA_RELEASES_API,
+    ASIC_NEWSROOM_FALLBACK_API,
     CNINFO_ANNOUNCEMENTS_API,
     CNINFO_PDF_BASE_URL,
     CPAAOB_INSPECTION_RECOMMENDATIONS_URL,
@@ -42,6 +43,7 @@ from .rules import (
     MIN_ARTICLE_CHARS,
     MOF_SANCTIONS_URL,
     PCAOB_NEWS_URL,
+    PCAOB_NEWS_SEARCH_API,
     PUBLIC_ARTICLE_DOMAINS,
     SEC_AAER_RSS,
     SEC_ADMIN_PROCEEDINGS_RSS,
@@ -579,8 +581,8 @@ class HKEXAccountingSource(Source):
         )[:8]
 
 
-_REIWA_DATE_PATTERN = re.compile(
-    r"令和\s*(?P<year>元|\d+)\s*年\s*(?P<month>\d+)\s*月\s*(?P<day>\d+)\s*日"
+_JAPANESE_DATE_PATTERN = re.compile(
+    r"(?P<era>令和|平成|昭和)\s*(?P<year>元|\d+)\s*年\s*(?P<month>\d+)\s*月\s*(?P<day>\d+)\s*日"
 )
 _CPAAOB_TITLE_TERMS = (
     "勧告",
@@ -606,26 +608,31 @@ def parse_cpaaob_listing(
         if not title or not any(term in title for term in _CPAAOB_TITLE_TERMS):
             continue
         context = title
-        date_match = _REIWA_DATE_PATTERN.search(context)
+        date_match = _JAPANESE_DATE_PATTERN.search(context)
         if date_match is None:
             for parent in anchor.parents:
                 if getattr(parent, "name", None) not in {"li", "td", "tr", "div", "p"}:
                     continue
+                if len(parent.select("a[href]")) > 1:
+                    break
                 context = _clean_text(parent.get_text(" "))
-                date_match = _REIWA_DATE_PATTERN.search(context)
+                date_match = _JAPANESE_DATE_PATTERN.search(context)
                 if date_match is not None:
                     break
         if date_match is None:
             continue
         era_year = 1 if date_match.group("year") == "元" else int(date_match.group("year"))
-        published = _source_day_timestamp(
-            2018 + era_year,
-            int(date_match.group("month")),
-            int(date_match.group("day")),
-            "Asia/Tokyo",
-            now,
-        )
-        if published < since:
+        try:
+            published = _source_day_timestamp(
+                {"令和": 2018, "平成": 1988, "昭和": 1925}[date_match.group("era")] + era_year,
+                int(date_match.group("month")),
+                int(date_match.group("day")),
+                "Asia/Tokyo",
+                now,
+            )
+        except ValueError:
+            continue
+        if published < since or published.date() > now.astimezone(ZoneInfo("Asia/Tokyo")).date():
             continue
         items.append(
             ContentItem(
@@ -858,27 +865,34 @@ def parse_csrc_records(
     return _unique_by_url(items)
 
 
-def parse_asic_records(payload: object, since: datetime) -> list[ContentItem]:
+def parse_asic_records(
+    payload: object, since: datetime, api_url: str = ASIC_MEDIA_RELEASES_API
+) -> list[ContentItem]:
     """Convert ASIC's public newsroom JSON to media-release records."""
     if not isinstance(payload, list):
-        return []
+        raise SourceFetchError("ASIC newsroom response is not a list of media releases")
 
     now = datetime.now(timezone.utc)
     items: list[ContentItem] = []
     for record in payload:
         if not isinstance(record, dict):
             continue
+        if record.get("metaType", "media release") != "media release":
+            continue
         title = _clean_text(str(record.get("name", "")))
         raw_url = str(record.get("url", "")).strip()
-        published = _to_utc(
-            # ASIC's publishedDate is a local newsroom date that is sometimes
-            # emitted with a misleading trailing Z. createDate is the actual
-            # machine timestamp and avoids future-dated candidates.
-            str(record.get("createDate") or record.get("publishedDate") or ""),
-            now,
-        )
-        if not title or not raw_url or published < since:
+        try:
+            # The newsroom emits Sydney wall time with a misleading Z suffix.
+            # createDate is the draft creation time, often days before publication.
+            local_published = date_parser.isoparse(str(record.get("publishedDate") or ""))
+            source_timestamp = local_published.replace(tzinfo=ZoneInfo("Australia/Sydney")).astimezone(timezone.utc)
+        except (TypeError, ValueError, OverflowError):
             continue
+        if not title or not raw_url or source_timestamp < since or source_timestamp > now:
+            continue
+        published = _source_day_timestamp(
+            local_published.year, local_published.month, local_published.day, "Australia/Sydney", now
+        )
         summary = _clean_text(
             " ".join(
                 (
@@ -898,7 +912,9 @@ def parse_asic_records(payload: object, since: datetime) -> list[ContentItem]:
                 published_at=published,
                 metadata={
                     "document_number": str(record.get("documentNumber", "")),
-                    "api_url": ASIC_MEDIA_RELEASES_API,
+                    "api_url": api_url,
+                    "source_timestamp": source_timestamp.isoformat(),
+                    "date_precision": "day",
                 },
             )
         )
@@ -909,17 +925,22 @@ class ASICJSONSource(Source):
     name = "ASIC Financial Reporting & Audit"
 
     async def fetch(self, since: datetime) -> list[ContentItem]:
-        try:
-            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-                response = await client.get(
-                    ASIC_MEDIA_RELEASES_API,
-                    headers={"User-Agent": "audit-regulatory-intel-bot/2.0"},
-                )
-                response.raise_for_status()
-                payload = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise SourceFetchError(f"ASIC JSON fetch failed: {exc}") from exc
-        return parse_asic_records(payload, since)
+        last_error: Exception | None = None
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            for api_url in (ASIC_MEDIA_RELEASES_API, ASIC_NEWSROOM_FALLBACK_API):
+                try:
+                    response = await client.get(
+                        api_url,
+                        headers={"User-Agent": "audit-regulatory-intel-bot/2.0"},
+                    )
+                    response.raise_for_status()
+                    items = parse_asic_records(response.json(), since, api_url)
+                    if api_url != ASIC_MEDIA_RELEASES_API:
+                        logger.warning("ASIC primary feed failed; used official newsroom fallback: %s", last_error)
+                    return items
+                except (httpx.HTTPError, ValueError, SourceFetchError) as exc:
+                    last_error = exc
+        raise SourceFetchError(f"ASIC newsroom feeds failed: {last_error}") from last_error
 
 
 class CSRCJSONSource(Source):
@@ -985,6 +1006,8 @@ def _date_from_context(
                 parsed = date_parser.parse(match.group(0))
             except (TypeError, ValueError, OverflowError):
                 return None
+            if parsed.date() > now.astimezone(ZoneInfo(timezone_name)).date():
+                return None
             return _source_day_timestamp(
                 parsed.year,
                 parsed.month,
@@ -1024,21 +1047,45 @@ def parse_dated_listing(
         if not title or url in seen:
             continue
 
+        containers = [anchor]
+        for container in anchor.parents:
+            if container.name in {"body", "html", "main"}:
+                break
+            if container.name not in {"div", "li", "article", "td", "tr", "p"}:
+                continue
+            # Never borrow a neighbouring card's publication date.
+            if len(container.select(f'a[href*="{link_pattern}"]')) > 1:
+                break
+            containers.append(container)
+
         context = anchor_context
-        published = _date_from_context(anchor_context, now, date_timezone)
-        if published is None:
-            for container in anchor.parents:
-                if getattr(container, "name", None) not in {"div", "li", "article"}:
-                    continue
-                candidate_context = _clean_text(container.get_text(" "))
-                candidate_date = _date_from_context(
-                    candidate_context,
-                    now,
-                    date_timezone,
-                )
-                if candidate_date is not None:
-                    context = candidate_context
-                    published = candidate_date
+        published = None
+        has_date_field = False
+        for container in containers:
+            date_field = container.select_one(
+                "time, .search__results-item-metadata, [class*='item-date'], "
+                "[class*='published-date'], [class*='publication-date']"
+            )
+            if date_field is None:
+                continue
+            has_date_field = True
+            context = _clean_text(container.get_text(" "))
+            raw_date = date_field.get("datetime") or _clean_text(date_field.get_text(" "))
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:T.*)?", raw_date):
+                try:
+                    day = date_parser.isoparse(raw_date).date()
+                    if day <= now.astimezone(ZoneInfo(date_timezone)).date():
+                        published = _source_day_timestamp(day.year, day.month, day.day, date_timezone, now)
+                except ValueError:
+                    pass
+            else:
+                published = _date_from_context(raw_date, now, date_timezone)
+            break
+        if not has_date_field:
+            for container in containers:
+                context = _clean_text(container.get_text(" "))
+                published = _date_from_context(context, now, date_timezone)
+                if published is not None:
                     break
         if published is None or published < since:
             continue
@@ -1491,9 +1538,99 @@ class PCAOBNewsSource(Source):
                     headers={"User-Agent": "audit-regulatory-intel-bot/2.0"},
                 )
                 response.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise SourceFetchError(f"PCAOB fetch failed: {exc}") from exc
-        return parse_pcaob_listing(response.text, self.url, since)
+                soup = BeautifulSoup(response.text, "html.parser")
+                widget = soup.select_one('[data-component="react-app-custom"][data-client-guid]')
+                if widget is None:
+                    # Older deployments rendered the releases directly in HTML.
+                    if soup.select_one('a[href*="news-release-detail"]'):
+                        return parse_pcaob_listing(response.text, self.url, since)
+                    raise SourceFetchError("PCAOB release listing has neither public search configuration nor releases")
+                api_url = str(widget.get("data-hawksearch-search-api", ""))
+                if api_url.lower().rstrip("/") != PCAOB_NEWS_SEARCH_API.rstrip("/"):
+                    raise SourceFetchError("PCAOB listing uses an unsupported public search endpoint")
+                index_name = widget.get("data-index-name")
+                if not index_name:
+                    raise SourceFetchError("PCAOB release listing is missing its public search index")
+                items: list[ContentItem] = []
+                for page_no in range(1, 11):
+                    search_response = await client.post(
+                        PCAOB_NEWS_SEARCH_API,
+                        json={
+                            "ClientGuid": widget["data-client-guid"],
+                            "IndexName": index_name,
+                            "CustomUrl": "/news-events/news-releases",
+                            "Keyword": "",
+                            "SortBy": "newest",
+                            "MaxPerPage": 96,
+                            "PageNo": page_no,
+                        },
+                    )
+                    search_response.raise_for_status()
+                    payload = search_response.json()
+                    page_items = parse_pcaob_records(payload, datetime(1970, 1, 1, tzinfo=timezone.utc))
+                    items.extend(item for item in page_items if item.published_at >= since)
+                    page_count = int(payload.get("Pagination", {}).get("NofPages", 1))
+                    if (
+                        page_no >= page_count
+                        or not page_items
+                        or min(item.published_at for item in page_items) < since
+                    ):
+                        return _unique_by_url(items)
+                raise SourceFetchError("PCAOB search exceeded 10 pages before covering the requested window")
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            raise SourceFetchError(f"PCAOB public news search failed: {exc}") from exc
+
+
+def parse_pcaob_records(payload: object, since: datetime) -> list[ContentItem]:
+    """Read the same public search records used by PCAOB's news-release page."""
+    if not isinstance(payload, dict) or payload.get("Success") is not True or not isinstance(payload.get("Results"), list):
+        raise SourceFetchError("PCAOB public search returned an unsuccessful or malformed response")
+    now = datetime.now(timezone.utc)
+    items: list[ContentItem] = []
+    valid_records = 0
+    for result in payload["Results"]:
+        document = result.get("Document", {}) if isinstance(result, dict) else {}
+        if not isinstance(document, dict):
+            continue
+
+        def value(name: str) -> str:
+            field = document.get(name, [])
+            return str(field[0]) if isinstance(field, list) and field else ""
+
+        raw_url = value("pageurl")
+        if "/news-events/news-releases/news-release-detail/" not in raw_url:
+            continue
+        title = _clean_text(value("title"))
+        try:
+            source_date = date_parser.isoparse(value("displayarticledate") or value("publicationdate")).date()
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if source_date > now.astimezone(ZoneInfo("America/New_York")).date():
+            continue
+        published = _source_day_timestamp(source_date.year, source_date.month, source_date.day, "America/New_York", now)
+        if not title:
+            continue
+        valid_records += 1
+        if published < since:
+            continue
+        article_text = _clean_text(value("pagecontent"))[:MAX_ARTICLE_CHARS]
+        items.append(ContentItem(
+            source="PCAOB",
+            title=title,
+            url=urljoin(PCAOB_NEWS_URL, raw_url),
+            published_at=published,
+            summary=article_text[:2_000],
+            article_text=article_text if len(article_text) >= MIN_ARTICLE_CHARS else "",
+            metadata={
+                "listing_url": PCAOB_NEWS_URL,
+                "api_url": PCAOB_NEWS_SEARCH_API,
+                "date_precision": "day",
+                "article_read_status": "provided_by_source" if len(article_text) >= MIN_ARTICLE_CHARS else "insufficient_source_text",
+            },
+        ))
+    if payload["Results"] and not valid_records:
+        raise SourceFetchError("PCAOB search records contained no valid dated news releases")
+    return _unique_by_url(items)
 
 
 def parse_pcaob_listing(html: str, page_url: str, since: datetime) -> list[ContentItem]:

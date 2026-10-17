@@ -1,4 +1,4 @@
-"""OpenAI-compatible generation of traceable Chinese deep-reading reports."""
+"""Anthropic/OpenAI-compatible generation of traceable Chinese deep-reading reports."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import re
 from datetime import date
 from typing import Protocol
 
+import httpx
 from openai import APIConnectionError, APIError, APIStatusError, AsyncOpenAI
 from pydantic import ValidationError
 
@@ -113,14 +114,60 @@ def _validate_source_references(report: DeepReadingReport, candidates: list[Cont
             raise ReportGenerationError("report altered a source publication date")
 
 
-class OpenAICompatibleDeepReadingGenerator:
+class DeepReadingGenerator:
     def __init__(self, settings: Settings, attempts: int = 3) -> None:
         self.settings = settings
         self.attempts = attempts
 
+    async def _request_content(self, prompt: str) -> str:
+        if self.settings.ai_protocol == "anthropic":
+            base_url = self.settings.ai_base_url.rstrip("/")
+            endpoint = f"{base_url}/messages" if base_url.endswith("/v1") else f"{base_url}/v1/messages"
+            async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=20)) as client:
+                response = await client.post(
+                    endpoint,
+                    headers={
+                        "Authorization": f"Bearer {self.settings.ai_api_key}",
+                        "anthropic-version": "2023-06-01",
+                    },
+                    json={
+                        "model": self.settings.ai_model,
+                        "max_tokens": 16_384,
+                        "temperature": 0.2,
+                        "system": SYSTEM_PROMPT,
+                        "messages": [{"role": "user", "content": prompt}],
+                    },
+                )
+            if response.is_error:
+                detail = response.text.replace(self.settings.ai_api_key, "[REDACTED]")[:1_000]
+                raise ReportGenerationError(f"Anthropic gateway HTTP {response.status_code}: {detail}")
+            data = response.json()
+            if data.get("stop_reason") == "max_tokens":
+                raise ReportGenerationError("Anthropic gateway response exceeded max_tokens")
+            # Thinking and tool-use blocks are not part of the JSON report.
+            return "".join(block["text"] for block in data["content"] if block.get("type") == "text")
+
+        async with AsyncOpenAI(
+            api_key=self.settings.ai_api_key,
+            base_url=self.settings.ai_base_url,
+            timeout=60,
+            max_retries=0,
+        ) as client:
+            response = await client.chat.completions.create(
+                model=self.settings.ai_model,
+                temperature=0.2,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+        return response.choices[0].message.content or ""
+
     async def generate(self, report_date: date, candidates: list[ContentItem]) -> DeepReadingReport:
         if not self.settings.ai_api_key:
-            raise ReportGenerationError("AI_API_KEY is not configured")
+            key_name = "ANTHROPIC_AUTH_TOKEN" if self.settings.ai_protocol == "anthropic" else "AI_API_KEY"
+            raise ReportGenerationError(f"{key_name} is not configured")
         readable_candidates = sorted(
             (item for item in candidates if item.article_text),
             key=lambda item: (item.score, item.published_at),
@@ -130,29 +177,11 @@ class OpenAICompatibleDeepReadingGenerator:
             raise ReportGenerationError("no publicly readable full articles were collected")
         min_analyses, max_analyses = _output_count_bounds(len(readable_candidates))
 
-        payload = {
-            "model": self.settings.ai_model,
-            "temperature": 0.2,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": _request_prompt(report_date, readable_candidates, min_analyses, max_analyses),
-                },
-            ],
-        }
+        prompt = _request_prompt(report_date, readable_candidates, min_analyses, max_analyses)
         last_error: Exception | None = None
         for attempt in range(1, self.attempts + 1):
             try:
-                async with AsyncOpenAI(
-                    api_key=self.settings.ai_api_key,
-                    base_url=self.settings.ai_base_url,
-                    timeout=60,
-                    max_retries=0,
-                ) as client:
-                    response = await client.chat.completions.create(**payload)
-                content = response.choices[0].message.content
+                content = await self._request_content(prompt)
                 if not content:
                     raise ReportGenerationError("AI gateway returned an empty response")
                 report = DeepReadingReport.model_validate(_extract_json(content))
@@ -168,7 +197,10 @@ class OpenAICompatibleDeepReadingGenerator:
                 APIConnectionError,
                 APIStatusError,
                 APIError,
+                httpx.HTTPError,
+                json.JSONDecodeError,
                 IndexError,
+                KeyError,
                 TypeError,
                 ValidationError,
                 ReportGenerationError,
@@ -182,4 +214,5 @@ class OpenAICompatibleDeepReadingGenerator:
 # Backward-compatible aliases for callers that imported the old names.
 BriefGenerationError = ReportGenerationError
 BriefGenerator = ReportGenerator
-OpenAICompatibleBriefGenerator = OpenAICompatibleDeepReadingGenerator
+OpenAICompatibleDeepReadingGenerator = DeepReadingGenerator
+OpenAICompatibleBriefGenerator = DeepReadingGenerator

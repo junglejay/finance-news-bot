@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from .ai import BriefGenerator, OpenAICompatibleBriefGenerator
+from .ai import BriefGenerator, DeepReadingGenerator
 from .config import Settings
 from .dingtalk import DingTalkNotifier
 from .history import DeliveryHistory
@@ -61,7 +61,7 @@ class BriefService:
     ) -> None:
         self.settings = settings
         self.sources = sources if sources is not None else build_sources(settings)
-        self.generator = generator if generator is not None else OpenAICompatibleBriefGenerator(settings)
+        self.generator = generator if generator is not None else DeepReadingGenerator(settings)
         self.notifier = notifier if notifier is not None else DingTalkNotifier(settings)
         self.article_reader = (
             article_reader

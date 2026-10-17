@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from datetime import date, datetime, timezone
 
 import pytest
@@ -9,10 +11,12 @@ from httpx import Response
 from app.ai import (
     MAX_AI_ARTICLE_CHARS,
     BriefGenerationError,
+    DeepReadingGenerator,
     OpenAICompatibleBriefGenerator,
     _candidate_payload,
 )
 from app.models import ContentItem, DeepReadingReport, ItemCategory
+from app.rules import SYSTEM_PROMPT
 
 
 def _analysis(url: str) -> dict[str, object]:
@@ -30,6 +34,113 @@ def _analysis(url: str) -> dict[str, object]:
         "transmission_or_risk": ["Researchers can monitor whether later inventory data confirms the stated supply change."],
         "limits_and_next_checks": ["Confirm the scale and timing in the linked source and subsequent official data."],
     }
+
+
+@pytest.fixture
+def anthropic_settings(settings):
+    return replace(
+        settings,
+        ai_protocol="anthropic",
+        ai_api_key="anthropic-test-token",
+        ai_base_url="https://open.bigmodel.cn/api/anthropic",
+        ai_model="glm-5.2",
+    )
+
+
+@pytest.fixture
+def readable_candidate() -> ContentItem:
+    return ContentItem(
+        source="Forbes",
+        title="Crude oil futures update",
+        url="https://example.test/oil",
+        article_text="Public article text with enough material for an analysis. " * 10,
+        published_at=datetime(2026, 7, 17, tzinfo=timezone.utc),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("versioned_base", [False, True])
+@respx.mock
+async def test_anthropic_messages_protocol_and_text_blocks(
+    anthropic_settings, readable_candidate, versioned_base
+) -> None:
+    if versioned_base:
+        anthropic_settings = replace(anthropic_settings, ai_base_url=anthropic_settings.ai_base_url + "/v1")
+    report_json = json.dumps(
+        {"report_date": "2026-07-17", "analyses": [_analysis(readable_candidate.url)]}
+    )
+    route = respx.post("https://open.bigmodel.cn/api/anthropic/v1/messages").mock(
+        return_value=Response(200, json={
+            "content": [
+                {"type": "thinking", "thinking": "This is not part of the report."},
+                {"type": "text", "text": report_json[:40]},
+                {"type": "text", "text": report_json[40:]},
+            ],
+            "stop_reason": "end_turn",
+        })
+    )
+
+    report = await DeepReadingGenerator(anthropic_settings).generate(
+        date(2026, 7, 17), [readable_candidate]
+    )
+
+    assert len(report.analyses) == 1
+    request = route.calls[0].request
+    assert request.headers["authorization"] == "Bearer anthropic-test-token"
+    assert request.headers["anthropic-version"] == "2023-06-01"
+    body = json.loads(request.content)
+    assert body["model"] == "glm-5.2"
+    assert body["max_tokens"] >= 8_192
+    assert body["system"] == SYSTEM_PROMPT
+    assert [message["role"] for message in body["messages"]] == ["user"]
+    assert "response_format" not in body
+    prompt = json.loads(body["messages"][0]["content"])
+    assert prompt["输入资料"][0]["article_text"] == readable_candidate.article_text
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_anthropic_retries_http_error(anthropic_settings, readable_candidate) -> None:
+    route = respx.post("https://open.bigmodel.cn/api/anthropic/v1/messages").mock(
+        side_effect=[
+            Response(429, json={"error": {"message": "rate limited"}}),
+            Response(200, json={"content": [{"type": "text", "text": json.dumps({
+                "report_date": "2026-07-17", "analyses": [_analysis(readable_candidate.url)]
+            })}]}),
+        ]
+    )
+
+    report = await DeepReadingGenerator(anthropic_settings, attempts=2).generate(
+        date(2026, 7, 17), [readable_candidate]
+    )
+
+    assert route.call_count == 2
+    assert report.analyses[0].url == readable_candidate.url
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["truncated", "unknown_url", "http_error"])
+@respx.mock
+async def test_anthropic_failures_are_reported(anthropic_settings, readable_candidate, failure) -> None:
+    if failure == "http_error":
+        response = Response(401, text="invalid token anthropic-test-token")
+        expected = "HTTP 401"
+    else:
+        url = "https://example.test/unknown" if failure == "unknown_url" else readable_candidate.url
+        response = Response(200, json={
+            "content": [{"type": "text", "text": json.dumps({
+                "report_date": "2026-07-17", "analyses": [_analysis(url)]
+            })}],
+            "stop_reason": "max_tokens" if failure == "truncated" else "end_turn",
+        })
+        expected = "unknown URL" if failure == "unknown_url" else "max_tokens"
+    respx.post("https://open.bigmodel.cn/api/anthropic/v1/messages").mock(return_value=response)
+
+    with pytest.raises(BriefGenerationError, match=expected) as error:
+        await DeepReadingGenerator(anthropic_settings, attempts=1).generate(
+            date(2026, 7, 17), [readable_candidate]
+        )
+    assert "anthropic-test-token" not in str(error.value)
 
 
 def test_report_model_accepts_six_selected_articles() -> None:

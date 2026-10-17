@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from email.message import EmailMessage
@@ -9,10 +10,13 @@ import respx
 from httpx import Response
 
 from app.models import ContentItem, ItemCategory
-from app.rules import SEC_AAER_RSS
+from app.rules import ASIC_MEDIA_RELEASES_API, ASIC_NEWSROOM_FALLBACK_API, PCAOB_NEWS_SEARCH_API, PCAOB_NEWS_URL, SEC_AAER_RSS
 from app.sources import (
+    ASICJSONSource,
+    PCAOBNewsSource,
     PublicArticleReader,
     RSSSource,
+    SourceFetchError,
     build_sources,
     extract_sec_8k_accounting_sections,
     extract_sec_8k_primary_url,
@@ -25,6 +29,7 @@ from app.sources import (
     parse_mof_listing,
     parse_newsletter_message,
     parse_pcaob_listing,
+    parse_pcaob_records,
     parse_scholar_message,
     parse_sec_8k_feed,
     parse_tdnet_listing,
@@ -87,7 +92,7 @@ def test_parse_asic_records_keeps_reporting_release_metadata() -> None:
     assert items[0].metadata["document_number"] == "26-999MR"
 
 
-def test_parse_asic_records_prefers_actual_create_timestamp() -> None:
+def test_parse_asic_records_uses_publication_time_in_sydney_not_draft_creation() -> None:
     payload = [
         {
             "name": "ASIC sanctions listed company auditor",
@@ -99,7 +104,47 @@ def test_parse_asic_records_prefers_actual_create_timestamp() -> None:
 
     items = parse_asic_records(payload, SINCE)
 
-    assert items[0].published_at.isoformat() == "2026-07-19T04:30:00+00:00"
+    assert items[0].metadata["source_timestamp"] == "2026-07-19T06:00:00+00:00"
+    assert items[0].published_at.date() == date(2026, 7, 19)
+
+
+def test_asic_publication_time_observes_sydney_daylight_saving() -> None:
+    items = parse_asic_records([{
+        "name": "New audit inspection findings",
+        "url": "/newsroom/media-releases/2026-releases/example",
+        "publishedDate": "2026-10-16T12:15:00Z",
+        "createDate": "2026-10-12T00:00:00Z",
+    }], datetime(2026, 10, 16, 0, tzinfo=timezone.utc))
+
+    assert items[0].metadata["source_timestamp"] == "2026-10-16T01:15:00+00:00"
+    assert items[0].published_at.date() == date(2026, 10, 16)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_asic_uses_official_newsroom_fallback_and_excludes_speeches() -> None:
+    primary = respx.get(ASIC_MEDIA_RELEASES_API).respond(404)
+    backup = respx.get(ASIC_NEWSROOM_FALLBACK_API).respond(200, json=[
+        {"name": "Auditor sanctioned", "url": "/newsroom/media-releases/example", "publishedDate": "2026-07-18T12:00:00Z", "metaType": "media release"},
+        {"name": "Chair speech", "url": "/newsroom/speeches/example", "publishedDate": "2026-07-18T12:00:00Z", "metaType": "speech"},
+    ])
+
+    items = await ASICJSONSource().fetch(SINCE)
+
+    assert primary.called and backup.called
+    assert len(items) == 1
+    assert items[0].title == "Auditor sanctioned"
+    assert items[0].metadata["api_url"] == ASIC_NEWSROOM_FALLBACK_API
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_asic_reports_failure_when_both_official_feeds_are_unavailable() -> None:
+    respx.get(ASIC_MEDIA_RELEASES_API).respond(404)
+    respx.get(ASIC_NEWSROOM_FALLBACK_API).respond(503)
+
+    with pytest.raises(SourceFetchError, match="newsroom feeds failed"):
+        await ASICJSONSource().fetch(SINCE)
 
 
 def test_parse_sec_8k_feed_keeps_only_audit_and_restatement_items() -> None:
@@ -221,6 +266,21 @@ def test_parse_cpaaob_listing_supports_reiwa_dates() -> None:
     assert items[0].category == ItemCategory.PUBLIC_COMPANY_AUDIT
 
 
+def test_cpaaob_does_not_relabel_heisei_release_with_neighbouring_reiwa_date() -> None:
+    html = """
+    <div>
+      <p><a href="new.pdf">監査法人の検査結果に基づく勧告（令和８年７月１８日）</a></p>
+      <p><a href="old.pdf">監査法人の検査結果に基づく勧告（平成30年５月18日）</a></p>
+      <p><a href="undated.pdf">監査法人の検査結果に基づく勧告</a></p>
+    </div>
+    """
+    items = parse_cpaaob_listing(html, "https://www.fsa.go.jp/cpaaob/example/", SINCE)
+
+    assert len(items) == 1
+    assert items[0].url.endswith("new.pdf")
+    assert items[0].published_at.date() == date(2026, 7, 18)
+
+
 def test_parse_dated_listing_supports_frc_day_month_year() -> None:
     html = """
     <li class="search__results-item">
@@ -242,6 +302,33 @@ def test_parse_dated_listing_supports_frc_day_month_year() -> None:
     assert len(items) == 1
     assert items[0].published_at.date().isoformat() == "2026-07-18"
     assert items[0].category == ItemCategory.PUBLIC_COMPANY_AUDIT
+
+
+def test_frc_listing_prefers_publication_field_over_standard_effective_date() -> None:
+    html = """
+    <li class="search__results-item"><div class="search__results-item-content">
+      <a class="search__results-item-title" href="/news-and-events/news/2026/07/guidance/">Audit reporting guidance</a>
+      <p class="search__results-item-description">The standard takes effect on 15 December 2026.</p>
+      <p class="search__results-item-metadata">18 July 2026</p>
+    </div></li>
+    """
+    items = parse_dated_listing(html, "https://www.frc.org.uk/news-and-events/news/", "UK FRC Audit & Reporting", "/news-and-events/news/", SINCE)
+
+    assert len(items) == 1
+    assert items[0].published_at.date() == date(2026, 7, 18)
+
+
+def test_listing_does_not_borrow_another_cards_date_or_include_future_release() -> None:
+    html = """
+    <div>
+      <article><a href="/news-and-events/news/2026/07/undated/">Undated audit release</a></article>
+      <article><a href="/news-and-events/news/2026/07/current/">Current audit release</a><time datetime="2026-07-18">18 July 2026</time></article>
+      <article><a href="/news-and-events/news/2099/07/future/">Future audit release</a><time datetime="2099-07-18">18 July 2099</time></article>
+    </div>
+    """
+    items = parse_dated_listing(html, "https://www.frc.org.uk/news-and-events/news/", "UK FRC Audit & Reporting", "/news-and-events/news/", SINCE)
+
+    assert [item.title for item in items] == ["Current audit release"]
 
 
 def test_date_only_listing_is_not_dropped_at_midday_boundary() -> None:
@@ -404,6 +491,68 @@ def test_parse_pcaob_recent_updates_card_uses_descriptive_title() -> None:
 
     assert len(items) == 1
     assert items[0].title == "PCAOB Posts New Inspection Reports"
+
+
+def _pcaob_search_result(day: str, slug: str = "audit-release") -> dict:
+    return {"Document": {
+        "title": ["PCAOB posts audit inspection findings"],
+        "pageurl": [f"/news-events/news-releases/news-release-detail/{slug}"],
+        "displayarticledate": [f"{day}T04:00:00-05:00"],
+        "pagecontent": ["The PCAOB has published detailed public company audit inspection findings. " * 10],
+    }}
+
+
+def test_pcaob_search_records_include_public_body_and_reject_stale_dates() -> None:
+    payload = {"Success": True, "Results": [
+        _pcaob_search_result("2026-07-18"),
+        _pcaob_search_result("2026-06-01", "old-release"),
+    ]}
+    items = parse_pcaob_records(payload, SINCE)
+
+    assert len(items) == 1
+    assert items[0].source == "PCAOB"
+    assert items[0].published_at.date() == date(2026, 7, 18)
+    assert len(items[0].article_text) >= 300
+    assert items[0].metadata["article_read_status"] == "provided_by_source"
+    assert items[0].metadata["api_url"] == PCAOB_NEWS_SEARCH_API
+
+
+@pytest.mark.parametrize("payload", [{"Success": False, "Results": []}, {"Success": True}, {"Success": True, "Results": [{"Document": {}}]}])
+def test_pcaob_search_errors_are_not_reported_as_empty_success(payload) -> None:
+    with pytest.raises(SourceFetchError, match="PCAOB"):
+        parse_pcaob_records(payload, SINCE)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_pcaob_fetch_discovers_current_index_and_paginates() -> None:
+    respx.get(PCAOB_NEWS_URL).respond(200, text=f"""
+      <div data-component="react-app-custom" data-client-guid="public-client"
+           data-index-name="pcaob.current-index" data-hawksearch-search-api="{PCAOB_NEWS_SEARCH_API}"></div>
+    """)
+    route = respx.post(PCAOB_NEWS_SEARCH_API).mock(side_effect=[
+        Response(200, json={"Success": True, "Pagination": {"NofPages": 3}, "Results": [_pcaob_search_result("2026-07-18")]}),
+        Response(200, json={"Success": True, "Pagination": {"NofPages": 3}, "Results": [_pcaob_search_result("2026-07-16", "older")]}),
+    ])
+
+    items = await PCAOBNewsSource().fetch(SINCE)
+
+    assert len(items) == 1
+    assert route.call_count == 2
+    bodies = [json.loads(call.request.content) for call in route.calls]
+    assert [body["PageNo"] for body in bodies] == [1, 2]
+    assert all(body["IndexName"] == "pcaob.current-index" for body in bodies)
+    assert all(body["CustomUrl"] == "/news-events/news-releases" for body in bodies)
+    assert all(body["SortBy"] == "newest" for body in bodies)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_pcaob_empty_javascript_shell_is_a_failure() -> None:
+    respx.get(PCAOB_NEWS_URL).respond(200, text="<html><body>Loading news...</body></html>")
+
+    with pytest.raises(SourceFetchError, match="neither public search configuration nor releases"):
+        await PCAOBNewsSource().fetch(SINCE)
 
 
 def test_parse_scholar_alert_email_keeps_paper_links_only() -> None:

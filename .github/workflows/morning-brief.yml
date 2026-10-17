@@ -19,7 +19,9 @@ jobs:
     timeout-minutes: 15
     env:
       TIMEZONE: Asia/Shanghai
-      AI_API_KEY: ${{ secrets.AI_API_KEY }}
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+      ANTHROPIC_BASE_URL: ${{ vars.ANTHROPIC_BASE_URL || 'https://open.bigmodel.cn/api/anthropic' }}
+      ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || 'glm-5.2' }}
       DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
       SCHOLAR_IMAP_HOST: ${{ secrets.SCHOLAR_IMAP_HOST }}
       SCHOLAR_IMAP_PORT: ${{ secrets.SCHOLAR_IMAP_PORT }}

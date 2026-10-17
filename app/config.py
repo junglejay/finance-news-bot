@@ -58,6 +58,7 @@ class Settings:
     extra_rss_feeds: tuple[tuple[str, str], ...]
     extra_article_domains: tuple[str, ...]
     delivery_history_file: str
+    ai_protocol: str = "openai"
 
     @property
     def scholar_enabled(self) -> bool:
@@ -73,11 +74,27 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
+        anthropic_configured = any(
+            _value(name)
+            for name in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL")
+        )
+        if anthropic_configured:
+            ai_api_key = _value("ANTHROPIC_AUTH_TOKEN")
+            ai_base_url = _value("ANTHROPIC_BASE_URL", "https://open.bigmodel.cn/api/anthropic")
+            ai_model = _value("ANTHROPIC_MODEL", "glm-5.2")
+            ai_protocol = "anthropic"
+        else:
+            # Existing AI_* configurations can still use an OpenAI-compatible gateway.
+            ai_api_key = _value("AI_API_KEY")
+            ai_base_url = _value("AI_BASE_URL", "https://open.bigmodel.cn/api/anthropic")
+            ai_model = _value("AI_MODEL", "glm-5.2")
+            ai_protocol = "anthropic" if "/anthropic" in ai_base_url else "openai"
         return cls(
             timezone=_value("TIMEZONE", "Asia/Shanghai"),
-            ai_api_key=_value("AI_API_KEY"),
-            ai_base_url=_value("AI_BASE_URL", "https://open.bigmodel.cn/api/anthropic").rstrip("/"),
-            ai_model=_value("AI_MODEL", "glm-5.3"),
+            ai_api_key=ai_api_key,
+            ai_base_url=ai_base_url.rstrip("/"),
+            ai_model=ai_model,
+            ai_protocol=ai_protocol,
             dingtalk_webhook=_value("DINGTALK_WEBHOOK"),
             dingtalk_secret=_value("DINGTALK_SECRET"),
             ft_feed_url=_value("FT_FEED_URL"),

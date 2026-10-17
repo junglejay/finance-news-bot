@@ -7,7 +7,7 @@
 3. 财务报告、内部控制和非标准审计意见；
 4. 与上述主题直接相关的专业研究。
 
-系统优先采集监管机构和审计准则制定机构的一手公开材料，读取可公开访问的正文，经确定性规则筛选后，再使用 OpenAI 兼容的 AI 网关生成逐篇中文深度解读并推送到钉钉。
+系统优先采集监管机构和审计准则制定机构的一手公开材料，读取可公开访问的正文，经确定性规则筛选后，再使用智谱 GLM-5.2（Anthropic 兼容 Messages API）生成逐篇中文深度解读并推送到钉钉。
 
 每次运行不保存原文或 AI 报告。抓取窗口默认为最近 24 小时，并通过 GitHub
 Actions 缓存仅保存“已成功推送的 URL 和时间”及内地新闻当日配额标记，避免手动重跑或来源时间重叠导致重复推送，并确保同一天重跑也不会发送第二篇内地新闻。
@@ -30,7 +30,7 @@ URL 历史默认保留 14 天。
 - SEC Litigation Releases；
 - SEC Administrative Proceedings；
 - SEC EDGAR 当日 8-K：只抓 Item 4.01（审计师变更）和 Item 4.02（财报不再可信、重述）；
-- PCAOB 新闻稿；
+- PCAOB 新闻稿：读取官方新闻页面当前使用的公开检索配置及 JSON，包含公开正文，不再使用受拦截的 News & Events 首页；
 - Thomson Reuters Tax & Accounting 的公开 PCAOB 专题报道，用于补足只发布执法令、未发新闻稿的 PCAOB 案件；
 - 英国 Financial Reporting Council（FRC）完整新闻栏目，经正文筛选审计质量、执法和财报内容；
 - International Auditing and Assurance Standards Board（IAASB）新闻；
@@ -38,7 +38,7 @@ URL 历史默认保留 14 天。
 - 中国证监会要闻公开接口（严格二次筛选）；
 - 巨潮资讯上市公司年报监管问询回复、会计师专项说明、财报更正及非标审计意见；
 - 财政部行政处罚结果；
-- 澳大利亚 ASIC 官方媒体发布公开 JSON；
+- 澳大利亚 ASIC 官网当前使用的媒体发布 JSON，主入口失败时自动切换到官方 Newsroom 备用 JSON；
 - 日本 TDnet 上市公司披露：只抓会计师变更、审计意见、财报更正、内控缺陷和会计调查；
 - 日本公认会计士・监查审查会（CPAAOB）的检查建议及监测报告；
 - 香港交易所 HKEXnews：只抓审计师变更、非标意见、财报重述、内控缺陷及会计调查；
@@ -87,7 +87,7 @@ AI 返回必须通过 Pydantic Schema、来源链接、标题、日期和正文�
 
 | Secret | 必填 | 用途 |
 | --- | --- | --- |
-| `AI_API_KEY` | 是 | OpenAI 兼容 AI 网关密钥 |
+| `ANTHROPIC_AUTH_TOKEN` | 是 | 智谱 API 密钥，仅保存在本地 `.env` 或 Actions Secret 中 |
 | `DINGTALK_WEBHOOK` | 否 | 钉钉机器人 Webhook；留空时打印到 Actions 日志 |
 | `DINGTALK_SECRET` | 否 | 钉钉机器人启用“加签”时需要 |
 | `SEC_USER_AGENT` | 建议 | 含联系邮箱的 SEC 请求标识，例如 `audit-bot/2.0 contact=you@example.com` |
@@ -97,7 +97,14 @@ AI 返回必须通过 Pydantic Schema、来源链接、标题、日期和正文�
 | `FT_FEED_URL` | 否 | 合法授权的 FT RSS 地址 |
 | `FT_EMAIL_SENDER` | 否 | 同一 IMAP 邮箱中 FT 官方通讯的发件人 |
 
-`AI_BASE_URL` 和 `AI_MODEL` 可通过 `.env` 或 Actions secrets/variables 覆盖。
+`ANTHROPIC_BASE_URL` 默认为 `https://open.bigmodel.cn/api/anthropic`，
+`ANTHROPIC_MODEL` 默认为 `glm-5.2`。本地模拟通过 `.env` 配置，Actions 通过同名
+repository variables 覆盖地址和模型，通过 Secret `ANTHROPIC_AUTH_TOKEN` 提供密钥。
+修改本地 `.env` 不会自动更新 GitHub Secrets。
+
+代码仍兼容旧的 `AI_API_KEY`、`AI_BASE_URL`、`AI_MODEL`；使用 OpenAI 兼容网关时，
+移除 `ANTHROPIC_*` 配置并显式设置对应 `AI_*` 值。存在 `ANTHROPIC_*` 配置时优先使用
+Anthropic 协议，请求 `/v1/messages`，不会向该地址发送 Chat Completions 格式的请求。
 
 ## 自定义公开来源
 
@@ -138,9 +145,15 @@ pytest -q
 ```bash
 python -m app.cli simulate --no-ai
 python -m app.cli simulate --hours 168 --no-ai
+python simulate_run.py              # 读取 .env，包含真实 AI 调用，不推送钉钉
 python inspect_fetch.py --source SEC
 python inspect_fetch.py --source 证监会
 ```
+
+采集检查可用 `python inspect_fetch.py --hours 168` 扩大到最近 7 天，避免把“当天无更新”误判为失效。
+任一来源最终抓取失败时，检查命令返回退出码 `1`，仍会展示其余来源结果。
+FRC 等列表优先读取独立发布日期字段；日本 CPAAOB 支持令和、平成、昭和日期，
+不会借用相邻公告的日期。未来日期不作为当前新闻入选。
 
 执行完整生产任务：
 
@@ -148,7 +161,8 @@ python inspect_fetch.py --source 证监会
 python -m app.cli run-once
 ```
 
-`simulate` 不会调用钉钉 Webhook。`run-once` 在未配置 Webhook 时会把完整报告打印到日志。
+`simulate` 不会调用钉钉 Webhook。`run-once` 从进程环境读取配置（本地运行前需导入 `.env`），
+在未配置 Webhook 时会把完整报告打印到日志。
 
 ## 失败处理
 

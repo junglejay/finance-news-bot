@@ -28,7 +28,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from app.ai import OpenAICompatibleBriefGenerator
+from app.ai import DeepReadingGenerator
 from app.config import Settings
 from app.models import ContentItem
 from app.rules import (
@@ -116,6 +116,7 @@ async def amain(args: argparse.Namespace) -> int:
     print(_bar())
     print(f"模拟任务   报告日期: {report_date.isoformat()}   窗口: {window_desc}")
     print(f"since = {since.isoformat()}   now = {now.isoformat()}")
+    print(f"AI: {settings.ai_protocol}   model = {settings.ai_model}   base_url = {settings.ai_base_url}")
     print(_bar())
 
     # --- 1. 抓取 ---
@@ -227,7 +228,7 @@ async def amain(args: argparse.Namespace) -> int:
     )
 
     print("\n调用 AI 网关生成报告中...")
-    generator = OpenAICompatibleBriefGenerator(settings)
+    generator = DeepReadingGenerator(settings)
     try:
         report = await generator.generate(report_date, candidates)
     except Exception as exc:

@@ -182,7 +182,7 @@ async def amain(args: argparse.Namespace) -> int:
         _dump_json(window_desc, since, fetched_at, sources, results)
     else:
         _print_report(window_desc, since, fetched_at, sources, results)
-    return 0
+    return 1 if any(error is not None for _, _, error in results) else 0
 
 
 def main() -> int:

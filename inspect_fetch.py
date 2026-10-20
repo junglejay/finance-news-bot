@@ -5,7 +5,7 @@
 方便确认每个源当前能抓到哪些条目。
 
 用法:
-    python inspect_fetch.py                  # 按生产窗口抓取（最近 24h，周一 72h）
+    python inspect_fetch.py                  # 国外近七天，香港/内地近24h
     python inspect_fetch.py --hours 168      # 抓最近 7 天，便于看清各源都有什么
     python inspect_fetch.py --source 证监会  # 只抓名称含“证监会”的源（可多次指定）
     python inspect_fetch.py --json           # 输出 JSON，便于管道处理
@@ -33,7 +33,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app.config import Settings
 from app.models import ContentItem
-from app.rules import DEFAULT_WINDOW_HOURS, WEEKEND_WINDOW_HOURS
+from app.regions import source_window_hours
+from app.rules import FOREIGN_WINDOW_HOURS
 from app.sources import Source, build_sources
 
 
@@ -52,13 +53,13 @@ def _load_env_file(path: str) -> None:
             os.environ.setdefault(key, value)
 
 
-def _resolve_window(hours: int | None, now: datetime, timezone_name: str) -> tuple[datetime, str]:
-    """返回 (since, 窗口描述)。未指定 hours 时按生产逻辑：周一 72h，其余 24h。"""
+def _resolve_window(hours: int | None, now: datetime, timezone_name: str, source: str = "") -> tuple[datetime, str]:
+    """Use the same per-source lookback as production, unless explicitly overridden."""
     if hours is not None:
         return now - timedelta(hours=hours), f"最近 {hours} 小时（手动指定）"
     local_weekday = now.astimezone(ZoneInfo(timezone_name)).weekday()
-    window_hours = WEEKEND_WINDOW_HOURS if local_weekday == 0 else DEFAULT_WINDOW_HOURS
-    return now - timedelta(hours=window_hours), f"最近 {window_hours} 小时（生产窗口）"
+    window_hours = source_window_hours(source, local_weekday) if source else FOREIGN_WINDOW_HOURS
+    return now - timedelta(hours=window_hours), "国外最近168小时；香港/内地最近24小时（生产窗口，since为最早截止）"
 
 
 def _format_error(exc: Exception) -> str:
@@ -95,6 +96,7 @@ def _print_report(
     fetched_at: datetime,
     sources: list[Source],
     results: list[tuple[str, list[ContentItem], str | None]],
+    since_by_source: dict[str, datetime] | None = None,
 ) -> None:
     total = ok = fail = 0
     bar = "=" * 78
@@ -112,6 +114,8 @@ def _print_report(
         ok += 1
         total += len(items)
         print(f"\n[{idx}/{len(sources)}] {name}   [OK]   {len(items)} 条")
+        if since_by_source:
+            print(f"  since = {since_by_source[name].isoformat()}")
         for item in items:
             pub = item.published_at.strftime("%Y-%m-%d %H:%M UTC")
             print(f"  - {item.title}")
@@ -132,6 +136,7 @@ def _dump_json(
     fetched_at: datetime,
     sources: list[Source],
     results: list[tuple[str, list[ContentItem], str | None]],
+    since_by_source: dict[str, datetime] | None = None,
 ) -> None:
     payload: dict = {
         "window": window_desc,
@@ -140,7 +145,7 @@ def _dump_json(
         "sources": [],
     }
     for (name, items, error) in results:
-        entry: dict = {"name": name}
+        entry: dict = {"name": name, "since": (since_by_source or {}).get(name, since).isoformat()}
         if error is not None:
             entry["status"] = "error"
             entry["error"] = error
@@ -176,12 +181,16 @@ async def amain(args: argparse.Namespace) -> int:
         print("没有匹配的信息源。", file=sys.stderr)
         return 1
 
-    results = await asyncio.gather(*(_fetch_one(s, since) for s in sources))
+    since_by_source = {
+        source.name: _resolve_window(args.hours, fetched_at, settings.timezone, source.name)[0]
+        for source in sources
+    }
+    results = await asyncio.gather(*(_fetch_one(s, since_by_source[s.name]) for s in sources))
 
     if args.json:
-        _dump_json(window_desc, since, fetched_at, sources, results)
+        _dump_json(window_desc, since, fetched_at, sources, results, since_by_source)
     else:
-        _print_report(window_desc, since, fetched_at, sources, results)
+        _print_report(window_desc, since, fetched_at, sources, results, since_by_source)
     return 1 if any(error is not None for _, _, error in results) else 0
 
 

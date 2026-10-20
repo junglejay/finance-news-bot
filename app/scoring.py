@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from .models import ContentItem, ItemCategory
+from .regions import is_foreign_article
 from .rules import (
     AUDIT_QUALITY_TERMS,
     AUDIT_TERMS,
@@ -25,6 +26,7 @@ from .rules import (
     LOW_VALUE_PROCEDURAL_TERMS,
     MAINLAND_CHINA_SOURCES,
     MAX_CANDIDATES,
+    MAX_AI_INPUT_CANDIDATES,
     MAX_ITEMS_PER_SOURCE,
     MAX_MAINLAND_CHINA_CANDIDATES,
     MIN_RELEVANCE_SCORE,
@@ -249,22 +251,32 @@ def select_candidates(
         if item.source in MAINLAND_CHINA_SOURCES:
             mainland_count += 1
 
-    categorized = {
-        category: [item for item in eligible if item.category == category]
-        for category in CATEGORY_LIMITS
-    }
-    for index in range(max(CATEGORY_LIMITS.values())):
-        for category, limit in CATEGORY_LIMITS.items():
-            if index < limit and index < len(categorized[category]):
-                add(categorized[category][index])
-
-    # Use relevant overflow when one category is busy, while retaining the
-    # per-source cap. There is intentionally no minimum-count padding.
-    for item in eligible:
-        add(item)
+    # Balance categories within each region tier. Admit foreign material first
+    # so a busy Hong Kong feed cannot crowd it out before the AI stage.
+    for foreign in (True, False):
+        tier = [item for item in eligible if is_foreign_article(item) == foreign]
+        categorized = {
+            category: [item for item in tier if item.category == category]
+            for category in CATEGORY_LIMITS
+        }
+        for index in range(max(CATEGORY_LIMITS.values())):
+            for category, limit in CATEGORY_LIMITS.items():
+                if index < limit and index < len(categorized[category]):
+                    add(categorized[category][index])
+        for item in tier:
+            add(item)
 
     return sorted(
         selected,
-        key=lambda item: (item.score, item.published_at),
+        key=lambda item: (is_foreign_article(item), item.score, item.published_at),
         reverse=True,
     )
+
+
+def select_ai_candidates(items: list[ContentItem]) -> list[ContentItem]:
+    """Apply the same foreign-first order to the ten readable AI inputs."""
+    return sorted(
+        (item for item in items if item.article_text),
+        key=lambda item: (is_foreign_article(item), item.score, item.published_at),
+        reverse=True,
+    )[:MAX_AI_INPUT_CANDIDATES]

@@ -11,9 +11,10 @@ from typing import Iterable
 class DeliveryHistory:
     """Persist delivered URLs and daily quota state, never article text or reports."""
 
-    def __init__(self, path: str, retention_days: int = 14) -> None:
+    def __init__(self, path: str, retention_days: int = 14, *, read_only: bool = False) -> None:
         self.path = Path(path) if path else None
         self.retention_days = retention_days
+        self.read_only = read_only
 
     @property
     def enabled(self) -> bool:
@@ -107,7 +108,7 @@ class DeliveryHistory:
         return retained
 
     def _save(self, records: dict[str, str], mainland_days: set[str]) -> None:
-        if self.path is None:
+        if self.path is None or self.read_only:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(f"{self.path.suffix}.tmp")

@@ -4,18 +4,30 @@ import json
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from email.message import EmailMessage
+from zoneinfo import ZoneInfo
 
 import pytest
 import respx
+import httpx
 from httpx import Response
 
 from app.models import ContentItem, ItemCategory
-from app.rules import ASIC_MEDIA_RELEASES_API, ASIC_NEWSROOM_FALLBACK_API, PCAOB_NEWS_SEARCH_API, PCAOB_NEWS_URL, SEC_AAER_RSS
+from app.rules import (
+    ASIC_MEDIA_RELEASES_API,
+    ASIC_NEWSROOM_FALLBACK_API,
+    PCAOB_NEWS_SEARCH_API,
+    PCAOB_NEWS_SEARCH_CLIENT_GUID,
+    PCAOB_NEWS_SEARCH_INDEX,
+    PCAOB_NEWS_URL,
+    SEC_AAER_RSS,
+    SEC_CURRENT_8K_ATOM,
+)
 from app.sources import (
     ASICJSONSource,
     PCAOBNewsSource,
     PublicArticleReader,
     RSSSource,
+    SEC8KAccountingSource,
     SourceFetchError,
     build_sources,
     extract_sec_8k_accounting_sections,
@@ -199,6 +211,154 @@ def test_sec_8k_index_and_section_extractors_target_primary_disclosure() -> None
     assert primary_url == "https://www.sec.gov/Archives/edgar/data/1/form8-k.htm"
     assert "dismissed Old Auditor" in section
     assert "Unrelated governance text" not in section
+
+
+def _sec_8k_entry(slug: str, published: str = "2026-07-18T18:00:00Z", item: str = "8.01") -> str:
+    return (
+        f"<entry><id>{slug}</id><title>8-K - {slug}</title>"
+        f'<link href="https://www.sec.gov/Archives/{slug}-index.htm"/>'
+        f"<updated>{published}</updated><summary>Item {item}: Filing disclosure</summary></entry>"
+    )
+
+
+def _sec_8k_atom(entries: list[str]) -> str:
+    return '<feed xmlns="http://www.w3.org/2005/Atom">' + "".join(entries) + "</feed>"
+
+
+def _sec_8k_full_page(published: str = "2026-07-18T18:00:00Z") -> str:
+    return _sec_8k_atom([_sec_8k_entry(f"unrelated-{index}", published) for index in range(100)])
+
+
+def _mock_sec_8k_document(slug: str, item: str = "4.01"):
+    index_route = respx.get(f"https://www.sec.gov/Archives/{slug}-index.htm").respond(200, text=(
+        f'<table><tr><td>1</td><td><a href="{slug}.htm">Document</a></td>'
+        '<td>Current report</td><td>8-K</td></tr></table>'
+    ))
+    respx.get(f"https://www.sec.gov/Archives/{slug}.htm").respond(200, text=(
+        f"<html><body><h2>Item {item}</h2><p>" + "Accounting and audit disclosure. " * 15 + "</p></body></html>"
+    ))
+    return index_route
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_sec_8k_reads_next_page_after_full_unrelated_page_and_stops_at_window() -> None:
+    first = respx.get(SEC_CURRENT_8K_ATOM).respond(200, text=_sec_8k_full_page())
+    next_url = httpx.URL(SEC_CURRENT_8K_ATOM).copy_set_param("start", 100)
+    second = respx.get(str(next_url)).respond(200, text=_sec_8k_atom([
+        _sec_8k_entry("audit", item="4.01"),
+        *[_sec_8k_entry(f"old-{index}", "2026-07-16T18:00:00Z") for index in range(99)],
+    ]))
+    index_route = _mock_sec_8k_document("audit")
+
+    items = await SEC8KAccountingSource("test-agent contact=test@example.com").fetch(SINCE)
+
+    assert first.call_count == second.call_count == index_route.call_count == 1
+    assert len(items) == 1
+    assert items[0].url == "https://www.sec.gov/Archives/audit.htm"
+    assert items[0].metadata["feed_url"] == str(next_url)
+    assert items[0].metadata["article_read_status"] == "provided_by_source"
+    assert len(items[0].article_text) >= 300
+    assert all(call.request.headers["User-Agent"] == "test-agent contact=test@example.com" for call in respx.calls)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_sec_8k_continues_when_page_ends_exactly_at_window_start() -> None:
+    respx.get(SEC_CURRENT_8K_ATOM).respond(200, text=_sec_8k_full_page(SINCE.isoformat()))
+    second = respx.get(str(httpx.URL(SEC_CURRENT_8K_ATOM).copy_set_param("start", 100))).respond(
+        200, text=_sec_8k_atom([_sec_8k_entry("restatement", SINCE.isoformat(), "4.02")])
+    )
+    _mock_sec_8k_document("restatement", "4.02")
+
+    items = await SEC8KAccountingSource("test-agent").fetch(SINCE)
+
+    assert second.called
+    assert len(items) == 1
+    assert items[0].published_at == SINCE
+    assert items[0].category == ItemCategory.REPORTING_CONTROLS
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_sec_8k_deduplicates_overlapping_pages_before_reading_documents() -> None:
+    audit_entry = _sec_8k_entry("audit", item="4.01")
+    respx.get(SEC_CURRENT_8K_ATOM).respond(200, text=_sec_8k_atom([
+        audit_entry, *[_sec_8k_entry(f"unrelated-{index}") for index in range(99)]
+    ]))
+    respx.get(str(httpx.URL(SEC_CURRENT_8K_ATOM).copy_set_param("start", 100))).respond(
+        200, text=_sec_8k_atom([audit_entry, _sec_8k_entry("other")])
+    )
+    index_route = _mock_sec_8k_document("audit")
+
+    items = await SEC8KAccountingSource("test-agent").fetch(SINCE)
+
+    assert len(items) == 1
+    assert index_route.call_count == 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize("empty_last_page", [False, True])
+async def test_sec_8k_stops_when_feed_is_exhausted_without_target_items(empty_last_page: bool) -> None:
+    if empty_last_page:
+        respx.get(SEC_CURRENT_8K_ATOM).respond(200, text=_sec_8k_full_page())
+        respx.get(str(httpx.URL(SEC_CURRENT_8K_ATOM).copy_set_param("start", 100))).respond(
+            200, text=_sec_8k_atom([])
+        )
+    else:
+        respx.get(SEC_CURRENT_8K_ATOM).respond(200, text=_sec_8k_atom([_sec_8k_entry("other")]))
+
+    assert await SEC8KAccountingSource("test-agent").fetch(SINCE) == []
+    assert len(respx.calls) == (2 if empty_last_page else 1)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_sec_8k_reports_failed_later_page_instead_of_returning_partial_items() -> None:
+    respx.get(SEC_CURRENT_8K_ATOM).respond(200, text=_sec_8k_atom([
+        _sec_8k_entry("audit", item="4.01"),
+        *[_sec_8k_entry(f"other-{index}") for index in range(99)],
+    ]))
+    respx.get(str(httpx.URL(SEC_CURRENT_8K_ATOM).copy_set_param("start", 100))).respond(503)
+
+    with pytest.raises(SourceFetchError, match="503"):
+        await SEC8KAccountingSource("test-agent").fetch(SINCE)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_sec_8k_repeated_page_is_a_failure() -> None:
+    page = _sec_8k_full_page()
+    respx.get(SEC_CURRENT_8K_ATOM).respond(200, text=page)
+    respx.get(str(httpx.URL(SEC_CURRENT_8K_ATOM).copy_set_param("start", 100))).respond(200, text=page)
+
+    with pytest.raises(SourceFetchError, match="repeated a page"):
+        await SEC8KAccountingSource("test-agent").fetch(SINCE)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_sec_8k_pagination_limit_is_a_failure(monkeypatch) -> None:
+    monkeypatch.setattr(SEC8KAccountingSource, "_MAX_PAGES", 1)
+    respx.get(SEC_CURRENT_8K_ATOM).respond(200, text=_sec_8k_full_page())
+
+    with pytest.raises(SourceFetchError, match="pagination limit"):
+        await SEC8KAccountingSource("test-agent").fetch(SINCE)
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize("content", [
+    "<html><body>Service unavailable</body></html>",
+    _sec_8k_atom([_sec_8k_entry("bad-date", "not-a-date")]),
+    _sec_8k_atom([_sec_8k_entry("missing-date", "")]),
+])
+async def test_sec_8k_invalid_feed_or_dates_are_failures(content: str) -> None:
+    respx.get(SEC_CURRENT_8K_ATOM).respond(200, text=content)
+
+    with pytest.raises(SourceFetchError, match="invalid Atom|invalid filing date"):
+        await SEC8KAccountingSource("test-agent").fetch(SINCE)
 
 
 def test_parse_tdnet_listing_keeps_targeted_auditor_change_only() -> None:
@@ -407,6 +567,50 @@ def test_parse_cninfo_records_prioritizes_auditor_year_report_reply() -> None:
     assert items[0].url == "https://static.cninfo.com.cn/finalpage/2026-07-18/a1.PDF"
 
 
+@pytest.mark.parametrize("day, included", [(17, False), (18, True), (19, True), (20, False)])
+def test_cninfo_date_window_includes_boundary_day_and_rejects_old_or_future_days(
+    monkeypatch, day: int, included: bool
+) -> None:
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = datetime(2026, 7, 19, 1, 59, tzinfo=timezone.utc)
+            return value.astimezone(tz) if tz else value.replace(tzinfo=None)
+
+    monkeypatch.setattr("app.sources.datetime", FrozenDatetime)
+    source_timestamp = datetime(2026, 7, day, tzinfo=ZoneInfo("Asia/Shanghai"))
+    since = datetime(2026, 7, 18, 1, 59, tzinfo=timezone.utc)
+    items = parse_cninfo_records([{"announcements": [{
+        "secCode": "920218",
+        "secName": "示例公司",
+        "announcementId": "reply",
+        "announcementTitle": "关于2026年半年报问询函回复的公告",
+        "announcementTime": int(source_timestamp.timestamp() * 1000),
+        "adjunctUrl": f"finalpage/2026-07-{day:02}/reply.PDF",
+    }]}], since)
+
+    assert bool(items) is included
+    if included:
+        assert items[0].published_at.date() == date(2026, 7, day)
+        assert items[0].published_at <= FrozenDatetime.now(timezone.utc)
+        assert items[0].metadata["source_timestamp"] == source_timestamp.astimezone(timezone.utc).isoformat()
+        assert items[0].metadata["date_precision"] == "day"
+
+
+def test_cninfo_window_boundary_uses_shanghai_date_not_utc_date() -> None:
+    # July 17 in UTC is already July 18 in Shanghai.
+    since = datetime(2026, 7, 17, 20, tzinfo=timezone.utc)
+    items = parse_cninfo_records([{"announcements": [{
+        "secCode": "920218",
+        "announcementTitle": "关于2026年半年报问询函回复的公告",
+        "announcementTime": int(datetime(2026, 7, 17, 16, tzinfo=timezone.utc).timestamp() * 1000),
+        "adjunctUrl": "finalpage/2026-07-18/reply.PDF",
+    }]}], since)
+
+    assert len(items) == 1
+    assert items[0].published_at.date() == date(2026, 7, 18)
+
+
 def test_parse_dated_listing_uses_date_inside_afrc_anchor() -> None:
     html = """
     <div>
@@ -550,9 +754,94 @@ async def test_pcaob_fetch_discovers_current_index_and_paginates() -> None:
 @respx.mock
 async def test_pcaob_empty_javascript_shell_is_a_failure() -> None:
     respx.get(PCAOB_NEWS_URL).respond(200, text="<html><body>Loading news...</body></html>")
+    respx.post(PCAOB_NEWS_SEARCH_API).respond(503)
 
     with pytest.raises(SourceFetchError, match="neither public search configuration nor releases"):
         await PCAOBNewsSource().fetch(SINCE)
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize("listing_status", [200, 403, 503])
+async def test_pcaob_public_search_fallback_preserves_text_dates_and_pagination(listing_status: int) -> None:
+    respx.get(PCAOB_NEWS_URL).respond(listing_status, text="<html>Loading news...</html>")
+    route = respx.post(PCAOB_NEWS_SEARCH_API).mock(side_effect=[
+        Response(200, json={"Success": True, "Pagination": {"NofPages": 3}, "Results": [_pcaob_search_result("2026-07-18")]}),
+        Response(200, json={"Success": True, "Pagination": {"NofPages": 3}, "Results": [_pcaob_search_result("2026-07-16", "old-release")]}),
+    ])
+
+    items = await PCAOBNewsSource().fetch(SINCE)
+
+    assert len(items) == 1
+    assert items[0].published_at.date() == date(2026, 7, 18)
+    assert len(items[0].article_text) >= 300
+    assert items[0].metadata["article_read_status"] == "provided_by_source"
+    bodies = [json.loads(call.request.content) for call in route.calls]
+    assert [body["PageNo"] for body in bodies] == [1, 2]
+    assert all(body["ClientGuid"] == PCAOB_NEWS_SEARCH_CLIENT_GUID for body in bodies)
+    assert all(body["IndexName"] == PCAOB_NEWS_SEARCH_INDEX for body in bodies)
+    assert all(body["CustomUrl"] == "/news-events/news-releases" for body in bodies)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_pcaob_falls_back_when_discovered_search_configuration_fails() -> None:
+    respx.get(PCAOB_NEWS_URL).respond(200, text=f"""
+      <div data-component="react-app-custom" data-client-guid="public-client"
+           data-index-name="pcaob.current-index" data-hawksearch-search-api="{PCAOB_NEWS_SEARCH_API}"></div>
+    """)
+    route = respx.post(PCAOB_NEWS_SEARCH_API).mock(side_effect=[
+        Response(400, text="Search configuration unavailable"),
+        Response(200, json={"Success": True, "Results": [_pcaob_search_result("2026-07-18")]}),
+    ])
+
+    items = await PCAOBNewsSource().fetch(SINCE)
+
+    assert len(items) == 1
+    assert [json.loads(call.request.content)["IndexName"] for call in route.calls] == [
+        "pcaob.current-index", PCAOB_NEWS_SEARCH_INDEX
+    ]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_pcaob_fallback_distinguishes_no_recent_news_from_empty_index() -> None:
+    respx.get(PCAOB_NEWS_URL).respond(403)
+    respx.post(PCAOB_NEWS_SEARCH_API).respond(200, json={
+        "Success": True, "Results": [_pcaob_search_result("2026-06-01")]
+    })
+
+    assert await PCAOBNewsSource().fetch(SINCE) == []
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize("payload", [
+    {"Success": True, "Results": []},
+    {"Success": False, "Results": []},
+    {"Success": True, "Results": [{"Document": {}}]},
+])
+async def test_pcaob_unusable_fallback_is_a_source_failure(payload: dict) -> None:
+    respx.get(PCAOB_NEWS_URL).respond(403)
+    respx.post(PCAOB_NEWS_SEARCH_API).respond(200, json=payload)
+
+    with pytest.raises(SourceFetchError, match="public search fallback:") as error:
+        await PCAOBNewsSource().fetch(SINCE)
+    assert "listing/current configuration:" in str(error.value)
+    assert "403" in str(error.value)
+    assert isinstance(error.value.__cause__, SourceFetchError)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_pcaob_reports_both_listing_and_api_failures() -> None:
+    respx.get(PCAOB_NEWS_URL).respond(403)
+    respx.post(PCAOB_NEWS_SEARCH_API).respond(503)
+
+    with pytest.raises(SourceFetchError, match="public search fallback:") as error:
+        await PCAOBNewsSource().fetch(SINCE)
+    assert "403" in str(error.value)
+    assert "503" in str(error.value)
 
 
 def test_parse_scholar_alert_email_keeps_paper_links_only() -> None:

@@ -129,6 +129,38 @@ async def test_generator_rejects_missing_or_invalid_short_brief(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("foreign_outputs", [3, 4])
+async def test_final_report_requires_foreign_majority_and_orders_foreign_first(
+    anthropic_settings, readable_candidate, monkeypatch, foreign_outputs
+):
+    candidates = [readable_candidate.model_copy(update={
+        "source": "SEC Press Releases" if index < 5 else "HKEX Audit & Reporting",
+        "url": f"https://example.test/{index}", "title": f"Article {index}",
+    }) for index in range(8)]
+    selected = candidates[5:5 + 6 - foreign_outputs] + candidates[:foreign_outputs]
+    analyses = []
+    for item in selected:
+        analysis = _analysis(item.url)
+        analysis.update(source=item.source, title=item.title)
+        analyses.append(analysis)
+
+    async def respond(prompt):
+        data = json.loads(prompt)
+        assert data["输入资料"][0]["region"] == "foreign"
+        assert "国外篇数要求" in data
+        return json.dumps({"report_date": "2026-07-17", "analyses": analyses})
+
+    generator = DeepReadingGenerator(anthropic_settings, attempts=1)
+    monkeypatch.setattr(generator, "_request_content", respond)
+    if foreign_outputs == 3:
+        with pytest.raises(BriefGenerationError, match="at least 4 foreign"):
+            await generator.generate(date(2026, 7, 17), candidates)
+    else:
+        report = await generator.generate(date(2026, 7, 17), candidates)
+        assert all(analysis.source.startswith("SEC") for analysis in report.analyses[:4])
+
+
+@pytest.mark.asyncio
 @respx.mock
 async def test_other_anthropic_gateways_keep_their_model_and_request_parameters(anthropic_settings) -> None:
     settings = replace(anthropic_settings, ai_base_url="https://gateway.example/anthropic", ai_model="custom-model[1m]")

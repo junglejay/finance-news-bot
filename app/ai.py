@@ -15,12 +15,13 @@ from pydantic import ValidationError
 
 from .config import Settings
 from .models import ArticleAnalysis, ContentItem, DeepReadingReport
+from .regions import article_region, is_foreign_article
+from .scoring import select_ai_candidates
 from .rules import (
     AI_OUTPUT_SCHEMA_TEMPLATE,
     AI_RULES,
     AI_TASK_DESCRIPTION,
     MAX_AI_ARTICLE_CHARS,
-    MAX_AI_INPUT_CANDIDATES,
     MAX_AI_OUTPUT_ARTICLES,
     MIN_AI_OUTPUT_ARTICLES,
     SYSTEM_PROMPT,
@@ -46,6 +47,7 @@ def _candidate_payload(candidates: list[ContentItem]) -> list[dict[str, object]]
     return [
         {
             "source": item.source,
+            "region": article_region(item),
             "category": item.category.value,
             "title": item.title,
             "url": item.url,
@@ -77,6 +79,11 @@ def _request_prompt(
             "When both values are the same, return exactly that number of analyses."
         ),
         "任务": AI_TASK_DESCRIPTION,
+        "国外篇数要求": (
+            "For an output of N analyses, include at least min(F, floor(N / 2) + 1) "
+            "foreign analyses, where F is the number of region=foreign inputs. "
+            "Keep foreign analyses before supplemental Hong Kong/Mainland articles."
+        ),
         "规则": AI_RULES,
         "目标 JSON": schema,
         "输入资料": _candidate_payload(candidates),
@@ -181,11 +188,7 @@ class DeepReadingGenerator:
         if not self.settings.ai_api_key:
             key_name = "ANTHROPIC_AUTH_TOKEN" if self.settings.ai_protocol == "anthropic" else "AI_API_KEY"
             raise ReportGenerationError(f"{key_name} is not configured")
-        readable_candidates = sorted(
-            (item for item in candidates if item.article_text),
-            key=lambda item: (item.score, item.published_at),
-            reverse=True,
-        )[:MAX_AI_INPUT_CANDIDATES]
+        readable_candidates = select_ai_candidates(candidates)
         if not readable_candidates:
             raise ReportGenerationError("no publicly readable full articles were collected")
         min_analyses, max_analyses = _output_count_bounds(len(readable_candidates))
@@ -205,8 +208,13 @@ class DeepReadingGenerator:
                         f"AI gateway must return between {min_analyses} and {max_analyses} analyses"
                     )
                 _validate_source_references(report, readable_candidates)
+                foreign_urls = {item.url for item in readable_candidates if is_foreign_article(item)}
+                required_foreign = min(len(foreign_urls), len(report.analyses) // 2 + 1)
+                if sum(analysis.url in foreign_urls for analysis in report.analyses) < required_foreign:
+                    raise ReportGenerationError(f"AI gateway must include at least {required_foreign} foreign analyses")
                 if any(analysis.dingtalk_brief is None for analysis in report.analyses):
                     raise ReportGenerationError("AI gateway omitted the required dingtalk_brief")
+                report.analyses.sort(key=lambda analysis: analysis.url in foreign_urls, reverse=True)
                 return report
             except (
                 APIConnectionError,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -23,6 +23,33 @@ class StaticSource(Source):
 
 class DuplicateSource(StaticSource):
     name = "Duplicate fixture source"
+
+
+@pytest.mark.asyncio
+async def test_service_passes_each_source_its_own_window(settings):
+    calls = {}
+
+    class RecordingSource(Source):
+        def __init__(self, name):
+            self.name = name
+
+        async def fetch(self, since):
+            calls[self.name] = since
+            return []
+
+    now = datetime(2026, 10, 20, 2, tzinfo=timezone.utc)
+    service = BriefService(settings, sources=[
+        RecordingSource("US DOJ Accounting Enforcement"),
+        RecordingSource("HKEX Audit & Reporting"),
+        RecordingSource("巨潮资讯年报问询与审计回复"),
+    ], notifier=FixtureNotifier())
+    result = await service.run_once(now)
+    assert result.status == "no_update"
+    assert calls == {
+        "US DOJ Accounting Enforcement": now - timedelta(hours=168),
+        "HKEX Audit & Reporting": now - timedelta(hours=24),
+        "巨潮资讯年报问询与审计回复": now - timedelta(hours=24),
+    }
 
 
 class FixtureGenerator:

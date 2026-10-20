@@ -9,10 +9,34 @@ from app.rules import (
     MAX_ITEMS_PER_SOURCE,
     MAX_MAINLAND_CHINA_CANDIDATES,
 )
-from app.scoring import score_item, select_candidates
+from app.scoring import score_item, select_ai_candidates, select_candidates
 
 
 NOW = datetime(2026, 7, 19, 1, tzinfo=timezone.utc)
+
+
+def test_foreign_candidates_and_ai_inputs_precede_higher_scoring_supplements():
+    foreign = [
+        ContentItem(source=f"SEC Feed {index // 4}", title=f"Foreign {index}",
+                    url=f"https://example.test/foreign-{index}", published_at=NOW,
+                    category=ItemCategory.PUBLIC_COMPANY_AUDIT, score=70,
+                    article_text="Public financial reporting audit text. " * 10)
+        for index in range(12)
+    ]
+    supplements = [
+        ContentItem(source=f"HKEX Feed {index // 4}", title=f"Supplement {index}",
+                    url=f"https://example.test/supplement-{index}", published_at=NOW,
+                    category=ItemCategory.REPORTING_CONTROLS, score=200,
+                    article_text="Public financial reporting text. " * 10)
+        for index in range(8)
+    ]
+    selected = select_candidates(supplements + foreign)
+    assert len(selected) == 12
+    assert all(item.source.startswith("SEC") for item in selected)
+    ai_inputs = select_ai_candidates(supplements + foreign[:3])
+    assert len(ai_inputs) == 10
+    assert ai_inputs[:3] == foreign[:3]
+    assert all(item.article_text for item in ai_inputs)
 
 
 def _item(

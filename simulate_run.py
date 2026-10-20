@@ -5,7 +5,7 @@
 需要真实推送请用 `python -m app.cli run-once`。
 
 用法:
-    python simulate_run.py              # 默认生产窗口（24h）
+    python simulate_run.py              # 国外近七天，香港/内地近24h
     python simulate_run.py --hours 168  # 指定抓取窗口
     python simulate_run.py --no-ai      # 跳过 AI，只看抓取/筛选/读正文
 """
@@ -30,15 +30,17 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app.ai import DeepReadingGenerator
 from app.config import Settings
+from app.history import DeliveryHistory
 from app.dingtalk import build_report_messages
 from app.models import ContentItem, DeepReadingReport
+from app.regions import is_foreign_article, source_window_hours
 from app.rules import (
     DEFAULT_WINDOW_HOURS,
     MAX_AI_INPUT_CANDIDATES,
     MAX_CANDIDATES,
-    WEEKEND_WINDOW_HOURS,
+    MAX_MAINLAND_CHINA_CANDIDATES,
 )
-from app.scoring import score_item, select_candidates
+from app.scoring import score_item, select_ai_candidates, select_candidates
 from app.service import BriefService
 from app.sources import PublicArticleReader, Source, build_sources
 
@@ -118,19 +120,26 @@ async def amain(args: argparse.Namespace) -> int:
         since = now - timedelta(hours=args.hours)
         window_desc = f"最近 {args.hours} 小时（手动指定）"
     else:
-        hours = WEEKEND_WINDOW_HOURS if local_now.weekday() == 0 else DEFAULT_WINDOW_HOURS
-        since = now - timedelta(hours=hours)
-        window_desc = f"最近 {hours} 小时（生产窗口）"
+        since = now - timedelta(hours=DEFAULT_WINDOW_HOURS)
+        window_desc = "国外最近 168 小时；香港/内地最近 24 小时（生产窗口）"
 
     print(_bar())
     print(f"模拟任务   报告日期: {report_date.isoformat()}   窗口: {window_desc}")
-    print(f"since = {since.isoformat()}   now = {now.isoformat()}")
+    print(f"now = {now.isoformat()}（各源分别计算截止时间）")
     print(f"AI: {settings.ai_protocol}   model = {settings.ai_model}   base_url = {settings.ai_base_url}")
     print(_bar())
 
     # --- 1. 抓取 ---
     sources = build_sources(settings)
-    raw = await asyncio.gather(*(_fetch_source(s, since) for s in sources))
+    raw = await asyncio.gather(*(
+        _fetch_source(s, since if args.hours is not None else now - timedelta(
+            hours=source_window_hours(s.name, local_now.weekday())
+        )) for s in sources
+    ))
+    history = DeliveryHistory(settings.delivery_history_file, read_only=True)
+    ignore_history = getattr(args, "ignore_history", False)
+    delivered_urls = set() if ignore_history else history.delivered_urls(now)
+    mainland_sent = False if ignore_history else history.mainland_delivered_on(report_date, now)
 
     collected: dict[str, ContentItem] = {}
     per_source: list[tuple[str, int, str | None]] = []
@@ -141,6 +150,8 @@ async def amain(args: argparse.Namespace) -> int:
         for item in items:
             collected.setdefault(item.checksum, item)
     all_items = list(collected.values())
+    history_skipped = sum(item.url in delivered_urls for item in all_items)
+    all_items = [item for item in all_items if item.url not in delivered_urls]
 
     print(f"\n【1】抓取原始新闻   源: {len(sources)} 个, 去重后 {len(all_items)} 条\n")
     for name, count, error in per_source:
@@ -148,6 +159,7 @@ async def amain(args: argparse.Namespace) -> int:
             print(f"  [FAIL] {name}: {error}")
         else:
             print(f"  [OK]   {name}: {count} 条")
+    print(f"推送历史：跳过 {history_skipped} 条；本次模拟不会修改历史。")
 
     # Official feeds often contain only terse headlines. Read allowed public
     # pages first so the rule engine can classify against actual body text.
@@ -156,7 +168,9 @@ async def amain(args: argparse.Namespace) -> int:
     all_items = [score_item(item, now) for item in all_items]
 
     # --- 2. 打分 + 选中候选 ---
-    candidates = select_candidates(all_items)
+    candidates = select_candidates(all_items, mainland_limit=0 if mainland_sent else MAX_MAINLAND_CHINA_CANDIDATES)
+    ai_input = select_ai_candidates(candidates)
+    ai_ids = {item.external_id for item in ai_input}
     candidate_ids = {item.external_id for item in candidates}
     ranked = sorted(all_items, key=lambda i: (i.score, i.published_at), reverse=True)
 
@@ -203,7 +217,7 @@ async def amain(args: argparse.Namespace) -> int:
                 "读取成功"
                 if item.article_text
                 else item.metadata.get("article_read_status", "unknown"),
-                "是" if item.article_text else "否",
+                "是" if item.external_id in ai_ids else "否",
                 item.title,
                 item.url,
             )
@@ -212,13 +226,13 @@ async def amain(args: argparse.Namespace) -> int:
     )
 
     if args.no_ai:
+        print(f"\nAI 输入候选 {len(ai_input)} 条，其中国外 {sum(is_foreign_article(item) for item in ai_input)} 条。")
         print("\n已指定 --no-ai，跳过 AI 生成与推送模拟。")
         return 0
 
     # --- 4. AI 生成（最终推送内容） ---
-    ai_input = sorted(readable, key=lambda i: (i.score, i.published_at), reverse=True)[:MAX_AI_INPUT_CANDIDATES]
     print(f"\n{_bar('-')}")
-    print(f"【4】AI 生成   输入候选 {len(ai_input)} 条（有正文，按分数取前 {MAX_AI_INPUT_CANDIDATES}）")
+    print(f"【4】AI 生成   输入候选 {len(ai_input)} 条（有正文，国外优先，上限 {MAX_AI_INPUT_CANDIDATES}）")
     print(_bar("-"))
     _print_table(
         ("#", "发布时间", "来源", "分类", "分数", "标题", "链接"),
@@ -279,6 +293,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="模拟一次完整任务并展示每一步结果")
     parser.add_argument("--hours", type=int, help="覆盖抓取窗口（小时）；不传则用生产窗口")
     parser.add_argument("--no-ai", action="store_true", help="跳过 AI 生成，只看抓取/筛选/读正文")
+    parser.add_argument("--ignore-history", action="store_true", help="诊断时忽略本地推送历史（仍不修改历史）")
     parser.add_argument("--env", default=".env", help="环境变量文件路径（默认 .env）")
     args = parser.parse_args()
     return asyncio.run(amain(args))

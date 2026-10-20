@@ -36,6 +36,7 @@ from .rules import (
     CSRC_NEWS_API,
     CSRC_PENALTIES_API,
     FRC_AUDIT_ENFORCEMENT_URL,
+    FCA_NEWS_RSS,
     FULL_TEXT_BLOCKED_SOURCES,
     HKEX_TITLE_SEARCH_URL,
     IAASB_NEWS_URL,
@@ -44,6 +45,8 @@ from .rules import (
     MOF_SANCTIONS_URL,
     PCAOB_NEWS_URL,
     PCAOB_NEWS_SEARCH_API,
+    PCAOB_NEWS_SEARCH_CLIENT_GUID,
+    PCAOB_NEWS_SEARCH_INDEX,
     PUBLIC_ARTICLE_DOMAINS,
     SEC_AAER_RSS,
     SEC_ADMIN_PROCEEDINGS_RSS,
@@ -107,6 +110,11 @@ class RSSSource(Source):
                 )
                 response.raise_for_status()
             parsed = feedparser.parse(response.content)
+            # SEC AAER currently contains unescaped XML characters. Feedparser
+            # still recognizes and recovers its entries; reject challenge pages
+            # and unusable feeds without discarding that readable official feed.
+            if not parsed.version or (parsed.bozo and not parsed.entries):
+                raise SourceFetchError("RSS response is not a valid RSS/Atom feed")
         except (httpx.HTTPError, ValueError) as exc:
             raise SourceFetchError(f"RSS fetch failed: {exc}") from exc
 
@@ -230,10 +238,59 @@ def extract_sec_8k_accounting_sections(
 
 class SEC8KAccountingSource(Source):
     name = "SEC 8-K Accounting Filings"
+    _PAGE_SIZE = 100
+    _MAX_PAGES = 100
 
     def __init__(self, user_agent: str, feed_url: str = SEC_CURRENT_8K_ATOM) -> None:
         self.user_agent = user_agent
         self.feed_url = feed_url
+
+    async def _fetch_filings(
+        self, client: httpx.AsyncClient, headers: dict[str, str], since: datetime
+    ) -> list[ContentItem]:
+        feed_url = httpx.URL(self.feed_url).copy_set_param("count", self._PAGE_SIZE)
+        items: list[ContentItem] = []
+        seen_pages: set[tuple[tuple[str, str], ...]] = set()
+        unknown_date = datetime.min.replace(tzinfo=timezone.utc)
+        for page_number in range(self._MAX_PAGES):
+            # EDGAR's current-filings Atom feed has no rel=next link.
+            page_url = feed_url.copy_set_param("start", page_number * self._PAGE_SIZE)
+            response = await client.get(page_url, headers=headers)
+            response.raise_for_status()
+            parsed = feedparser.parse(response.content)
+            if parsed.version != "atom10" or parsed.bozo:
+                raise SourceFetchError("SEC current 8-K returned an invalid Atom feed")
+            entries = parsed.entries
+            if not entries:
+                return _unique_by_url(items)
+
+            page_key = tuple(
+                (
+                    str(entry.get("id") or entry.get("link") or ""),
+                    str(entry.get("updated") or entry.get("published") or ""),
+                )
+                for entry in entries
+            )
+            if page_key in seen_pages:
+                raise SourceFetchError("SEC current 8-K pagination repeated a page before covering the window")
+            seen_pages.add(page_key)
+            dates = [
+                _to_utc(entry.get("updated") or entry.get("published"), unknown_date)
+                for entry in entries
+            ]
+            if unknown_date in dates:
+                raise SourceFetchError("SEC current 8-K feed contains a missing or invalid filing date")
+
+            page_items = parse_sec_8k_feed(response.content, since)
+            for item in page_items:
+                item.metadata["feed_url"] = str(response.url)
+            items.extend(page_items)
+            # Inspect every filing, including off-topic ones. A page with no
+            # Item 4.01/4.02 filings can still be entirely inside the window.
+            # Continue at equality because the next page can share that time.
+            if min(dates) < since or len(entries) < self._PAGE_SIZE:
+                return _unique_by_url(items)
+        raise SourceFetchError("SEC current 8-K exceeded the pagination limit before covering the window")
 
     async def fetch(self, since: datetime) -> list[ContentItem]:
         headers = {
@@ -242,9 +299,7 @@ class SEC8KAccountingSource(Source):
         }
         try:
             async with httpx.AsyncClient(timeout=25, follow_redirects=True) as client:
-                feed_response = await client.get(self.feed_url, headers=headers)
-                feed_response.raise_for_status()
-                items = parse_sec_8k_feed(feed_response.content, since)
+                items = await self._fetch_filings(client, headers, since)
                 semaphore = asyncio.Semaphore(ARTICLE_READER_CONCURRENCY)
 
                 async def add_filing_text(item: ContentItem) -> None:
@@ -781,6 +836,7 @@ def _extract_public_article_text(html: str, max_characters: int) -> str:
     root = (
         soup.select_one(".detail-page .ck-content")
         or soup.select_one(".ck-content")
+        or soup.select_one(".entry-content")
         or soup.find("article")
         or soup.find("main")
         or soup.select_one('[role="main"]')
@@ -1240,6 +1296,10 @@ def _is_focused_cninfo_title(title: str) -> bool:
 
 def parse_cninfo_records(payloads: Iterable[dict], since: datetime) -> list[ContentItem]:
     """Convert targeted public-company filings from CNInfo into candidates."""
+    source_timezone = ZoneInfo("Asia/Shanghai")
+    first_day = since.astimezone(source_timezone).date()
+    now = datetime.now(timezone.utc)
+    last_day = now.astimezone(source_timezone).date()
     items: list[ContentItem] = []
     for payload in payloads:
         records = payload.get("announcements") or []
@@ -1265,22 +1325,23 @@ def parse_cninfo_records(payloads: Iterable[dict], since: datetime) -> list[Cont
                 )
             except (TypeError, ValueError, OSError, OverflowError):
                 continue
+            # CNInfo exposes a publication date as a Shanghai-midnight epoch,
+            # not an exact release time. Include the entire boundary day; the
+            # delivery history removes overlap on subsequent runs.
+            source_day = source_timestamp.astimezone(source_timezone).date()
             if (
                 not title
                 or not raw_url
-                or source_timestamp < since
+                or not first_day <= source_day <= last_day
                 or not _is_focused_cninfo_title(title)
             ):
                 continue
-            source_day = source_timestamp.astimezone(
-                ZoneInfo("Asia/Shanghai")
-            ).date()
             published = _source_day_timestamp(
                 source_day.year,
                 source_day.month,
                 source_day.day,
                 "Asia/Shanghai",
-                datetime.now(timezone.utc),
+                now,
             )
             security_name = _clean_text(str(record.get("secName", "")))
             security_code = _clean_text(str(record.get("secCode", "")))
@@ -1531,8 +1592,8 @@ class PCAOBNewsSource(Source):
         self.url = url
 
     async def fetch(self, since: datetime) -> list[ContentItem]:
-        try:
-            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            try:
                 response = await client.get(
                     self.url,
                     headers={"User-Agent": "audit-regulatory-intel-bot/2.0"},
@@ -1551,34 +1612,57 @@ class PCAOBNewsSource(Source):
                 index_name = widget.get("data-index-name")
                 if not index_name:
                     raise SourceFetchError("PCAOB release listing is missing its public search index")
-                items: list[ContentItem] = []
-                for page_no in range(1, 11):
-                    search_response = await client.post(
-                        PCAOB_NEWS_SEARCH_API,
-                        json={
-                            "ClientGuid": widget["data-client-guid"],
-                            "IndexName": index_name,
-                            "CustomUrl": "/news-events/news-releases",
-                            "Keyword": "",
-                            "SortBy": "newest",
-                            "MaxPerPage": 96,
-                            "PageNo": page_no,
-                        },
+                return await self._fetch_search(client, since, widget["data-client-guid"], index_name)
+            except (httpx.HTTPError, ValueError, TypeError, SourceFetchError) as primary_error:
+                # The official public JSON includes release text. A blocked
+                # configuration page must not make this accessible API unusable.
+                try:
+                    items = await self._fetch_search(
+                        client, since, PCAOB_NEWS_SEARCH_CLIENT_GUID, PCAOB_NEWS_SEARCH_INDEX
                     )
-                    search_response.raise_for_status()
-                    payload = search_response.json()
-                    page_items = parse_pcaob_records(payload, datetime(1970, 1, 1, tzinfo=timezone.utc))
-                    items.extend(item for item in page_items if item.published_at >= since)
-                    page_count = int(payload.get("Pagination", {}).get("NofPages", 1))
-                    if (
-                        page_no >= page_count
-                        or not page_items
-                        or min(item.published_at for item in page_items) < since
-                    ):
-                        return _unique_by_url(items)
-                raise SourceFetchError("PCAOB search exceeded 10 pages before covering the requested window")
-        except (httpx.HTTPError, ValueError, TypeError) as exc:
-            raise SourceFetchError(f"PCAOB public news search failed: {exc}") from exc
+                except (httpx.HTTPError, ValueError, TypeError, SourceFetchError) as fallback_error:
+                    raise SourceFetchError(
+                        f"PCAOB public news search failed: listing/current configuration: {primary_error}; "
+                        f"public search fallback: {fallback_error}"
+                    ) from fallback_error
+                logger.warning("PCAOB listing/current search failed; used public search fallback: %s", primary_error)
+                return items
+
+    @staticmethod
+    async def _fetch_search(
+        client: httpx.AsyncClient, since: datetime, client_guid: str, index_name: str
+    ) -> list[ContentItem]:
+        items: list[ContentItem] = []
+        for page_no in range(1, 11):
+            response = await client.post(
+                PCAOB_NEWS_SEARCH_API,
+                json={
+                    "ClientGuid": client_guid,
+                    "IndexName": index_name,
+                    "CustomUrl": "/news-events/news-releases",
+                    "Keyword": "",
+                    "SortBy": "newest",
+                    "MaxPerPage": 96,
+                    "PageNo": page_no,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+            page_items = parse_pcaob_records(payload, datetime(1970, 1, 1, tzinfo=timezone.utc))
+            # No date filter is sent to the API: even on a quiet day, the first
+            # page must contain historical releases. An empty index can mean
+            # the public configuration expired, not that there is no news today.
+            if page_no == 1 and not page_items:
+                raise SourceFetchError("PCAOB search index returned no dated releases; public configuration may be stale")
+            items.extend(item for item in page_items if item.published_at >= since)
+            page_count = int(payload.get("Pagination", {}).get("NofPages", 1))
+            if (
+                page_no >= page_count
+                or not page_items
+                or min(item.published_at for item in page_items) < since
+            ):
+                return _unique_by_url(items)
+        raise SourceFetchError("PCAOB search exceeded 10 pages before covering the requested window")
 
 
 def parse_pcaob_records(payload: object, since: datetime) -> list[ContentItem]:
@@ -1953,6 +2037,8 @@ def _unique_by_url(items: Iterable[ContentItem]) -> list[ContentItem]:
 
 
 def build_sources(settings: Settings) -> list[Source]:
+    from .foreign_sources import CPABSource, DOJPressSource, JournalOfAccountancySource
+
     sources: list[Source] = [
         RSSSource(
             "SEC Accounting & Auditing Enforcement",
@@ -1964,6 +2050,10 @@ def build_sources(settings: Settings) -> list[Source]:
         RSSSource("SEC Administrative Proceedings", SEC_ADMIN_PROCEEDINGS_RSS),
         SEC8KAccountingSource(settings.sec_user_agent),
         PCAOBNewsSource(),
+        JournalOfAccountancySource(),
+        DOJPressSource(),
+        RSSSource("UK FCA", FCA_NEWS_RSS),
+        CPABSource(),
         DatedListingSource(
             "UK FRC Audit & Reporting",
             FRC_AUDIT_ENFORCEMENT_URL,

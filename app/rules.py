@@ -21,6 +21,11 @@ SEC_CURRENT_8K_ATOM = (
 )
 PCAOB_NEWS_URL = "https://pcaobus.org/news-events/news-releases"
 PCAOB_NEWS_SEARCH_API = "https://pcaob.searchapi-na.hawksearch.com/api/v2/search/"
+# Public browser configuration, verified against the live search API on
+# 2026-10-20. Use only if the listing cannot supply its current configuration.
+# These identify the public search widget; they are not authentication secrets.
+PCAOB_NEWS_SEARCH_CLIENT_GUID = "e962e95324cb46ef8955c0b09a3904b9"
+PCAOB_NEWS_SEARCH_INDEX = "pcaob.20260515.140735.all-data-types"
 # The unfiltered listing is intentional: FRC publishes audit inspection and
 # enforcement reviews under "Publications", not only under its investigation
 # tag. Compound topic scoring still rejects actuarial/stewardship news.
@@ -30,6 +35,11 @@ ASIC_MEDIA_RELEASES_API = "https://download.asic.gov.au/asic-nga/data/newsroom/n
 ASIC_NEWSROOM_FALLBACK_API = "https://download.asic.gov.au/asic-nga/data/newsroom/newsroom-latest.json"
 AFRC_PRESS_RELEASES_URL = "https://www.afrc.org.hk/en-hk/news-centre/press-releases/"
 THOMSON_REUTERS_PCAOB_URL = "https://tax.thomsonreuters.com/news/topic/pcaob/"
+JOA_NEWS_URL = "https://www.journalofaccountancy.com/news/"
+DOJ_PRESS_RELEASES_API = "https://www.justice.gov/api/v1/press_releases.json"
+FCA_NEWS_RSS = "https://www.fca.org.uk/news/rss.xml"
+CPAB_EXPRESS_ARCHIVE_URL = "https://cpab-ccrc.ca/subscribe/cpab-express-archive"
+CPAB_ENFORCEMENT_REPORTS_URL = "https://cpab-ccrc.ca/public_firm_reports/public-enforcement-actions"
 HKEX_TITLE_SEARCH_URL = "https://www1.hkexnews.hk/search/titleSearchServlet.do"
 TDNET_DAILY_LIST_URL = "https://www.release.tdnet.info/inbs/I_list_001_{date}.html"
 CPAAOB_INSPECTION_RECOMMENDATIONS_URL = (
@@ -56,6 +66,10 @@ CSRC_PENALTIES_API = (
 MOF_SANCTIONS_URL = "https://www.mof.gov.cn/gp/xxgkml/jdjcj/index.htm"
 
 PUBLIC_ARTICLE_DOMAINS = {
+    "cpab-ccrc.ca",
+    "fca.org.uk",
+    "journalofaccountancy.com",
+    "justice.gov",
     "afrc.org.hk",
     "asic.gov.au",
     "csrc.gov.cn",
@@ -382,6 +396,9 @@ LOW_VALUE_PROCEDURAL_TERMS = {
 # --- 3. Source authority and scope --------------------------------------------
 
 AUTHORITATIVE_SOURCE_PREFIXES = (
+    "Canada CPAB",
+    "UK FCA",
+    "US DOJ",
     "AFRC",
     "ASIC",
     "IAASB",
@@ -395,6 +412,9 @@ AUTHORITATIVE_SOURCE_PREFIXES = (
     "财政部",
 )
 AUTHORITATIVE_DOMAINS = {
+    "cpab-ccrc.ca",
+    "fca.org.uk",
+    "justice.gov",
     "afrc.org.hk",
     "asic.gov.au",
     "csrc.gov.cn",
@@ -409,6 +429,9 @@ AUTHORITATIVE_DOMAINS = {
     "sfc.hk",
 }
 REGULATORY_SOURCE_PREFIXES = (
+    "Canada CPAB",
+    "UK FCA",
+    "US DOJ",
     "AFRC",
     "ASIC",
     "HKEX",
@@ -421,6 +444,7 @@ REGULATORY_SOURCE_PREFIXES = (
 )
 DEDICATED_FRAUD_SOURCE_PREFIXES = ("SEC Accounting & Auditing Enforcement",)
 DEDICATED_AUDIT_SOURCE_PREFIXES = (
+    "Canada CPAB",
     "AFRC",
     "ASIC",
     "UK FRC",
@@ -468,6 +492,17 @@ OFF_TOPIC_PENALTY = 20
 
 DEFAULT_WINDOW_HOURS = 24
 WEEKEND_WINDOW_HOURS = 24
+FOREIGN_WINDOW_HOURS = 168
+FOREIGN_SOURCE_PREFIXES = (
+    "SEC", "PCAOB", "UK FRC", "Thomson Reuters PCAOB", "IAASB", "ASIC",
+    "Japan TDnet", "Japan CPAAOB", "Journal of Accountancy", "US DOJ",
+    "UK FCA", "Canada CPAB", "Financial Times", "Google Scholar Alert",
+)
+FOREIGN_ARTICLE_DOMAINS = {
+    "sec.gov", "pcaobus.org", "frc.org.uk", "thomsonreuters.com", "iaasb.org",
+    "asic.gov.au", "release.tdnet.info", "fsa.go.jp", "journalofaccountancy.com",
+    "justice.gov", "fca.org.uk", "cpab-ccrc.ca", "ft.com",
+}
 MAX_ARTICLE_CHARS = 16_000
 MIN_ARTICLE_CHARS = 300
 ARTICLE_READER_CONCURRENCY = 4
@@ -508,6 +543,7 @@ AI_OUTPUT_SCHEMA_TEMPLATE = {
 AI_TASK_DESCRIPTION = "从候选中选择最有事实密度和专业价值的财务造假、监管执法或上市公司审计材料，输出 1 至 6 篇深度解读，每篇同时提供独立撰写的钉钉中文短报 dingtalk_brief。"
 
 AI_RULES = [
+    "优先选择 region=foreign 的国外材料；香港和内地作为补充。必须满足请求中给出的国外篇数要求。",
     "analyses 只能选择 full_text_available=true 且 category 属于 fraud_enforcement、public_company_audit、reporting_controls 或 research 的输入条目。",
     "每篇的 title、source、url、published_at 必须与一个输入条目完全一致。",
     "优先顺序为：正式监管决定或纪律处分、包含具体审计缺陷的检查/执法材料、重大财务报告规则变化、事实充分的专业报道。",

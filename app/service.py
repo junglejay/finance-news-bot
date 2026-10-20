@@ -13,11 +13,10 @@ from .config import Settings
 from .dingtalk import DingTalkNotifier
 from .history import DeliveryHistory
 from .models import ContentItem
+from .regions import source_window_hours
 from .rules import (
-    DEFAULT_WINDOW_HOURS,
     MAINLAND_CHINA_SOURCES,
     MAX_MAINLAND_CHINA_CANDIDATES,
-    WEEKEND_WINDOW_HOURS,
 )
 from .scoring import score_item, select_candidates
 from .sources import PublicArticleReader, Source, build_sources
@@ -84,7 +83,6 @@ class BriefService:
     async def _run(self, now: datetime) -> RunResult:
         local_now = now.astimezone(ZoneInfo(self.settings.timezone))
         report_date = local_now.date()
-        since = self._window_start(now, local_now.weekday())
         result = RunResult(status="running", report_date=report_date.isoformat())
         collected: dict[str, ContentItem] = {}
         delivered_urls = self.history.delivered_urls(now)
@@ -95,6 +93,7 @@ class BriefService:
 
         async def fetch_one(source: Source) -> tuple[Source, list[ContentItem], Exception | None]:
             try:
+                since = self._window_start(now, local_now.weekday(), source.name)
                 items = await self._fetch_source_with_retries(source, since)
                 return source, items, None
             except Exception as exc:  # Source failures are isolated from every other collector.
@@ -186,10 +185,8 @@ class BriefService:
             return result
 
     @staticmethod
-    def _window_start(now: datetime, weekday: int) -> datetime:
-        # Keep the weekday branch for compatibility even though both defaults are
-        # currently 24 hours.
-        return now - timedelta(hours=WEEKEND_WINDOW_HOURS if weekday == 0 else DEFAULT_WINDOW_HOURS)
+    def _window_start(now: datetime, weekday: int, source: str = "") -> datetime:
+        return now - timedelta(hours=source_window_hours(source, weekday))
 
     async def _notify_fault_safely(self, error: str) -> None:
         try:

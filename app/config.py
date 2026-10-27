@@ -59,6 +59,8 @@ class Settings:
     extra_article_domains: tuple[str, ...]
     delivery_history_file: str
     ai_protocol: str = "openai"
+    optional_sources: tuple[str, ...] = ()
+    source_metrics_file: str = ".cache/source_metrics.json"
 
     @property
     def scholar_enabled(self) -> bool:
@@ -114,4 +116,8 @@ class Settings:
                 "DELIVERY_HISTORY_FILE",
                 ".cache/delivered_urls.json",
             ),
+            optional_sources=tuple(
+                name.lower() for name in re.split(r"[\s,]+", _value("OPTIONAL_SOURCES")) if name
+            ),
+            source_metrics_file=_value("SOURCE_METRICS_FILE", ".cache/source_metrics.json"),
         )

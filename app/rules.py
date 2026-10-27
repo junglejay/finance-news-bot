@@ -26,6 +26,11 @@ PCAOB_NEWS_SEARCH_API = "https://pcaob.searchapi-na.hawksearch.com/api/v2/search
 # These identify the public search widget; they are not authentication secrets.
 PCAOB_NEWS_SEARCH_CLIENT_GUID = "e962e95324cb46ef8955c0b09a3904b9"
 PCAOB_NEWS_SEARCH_INDEX = "pcaob.20260515.140735.all-data-types"
+PCAOB_ENFORCEMENT_PATH = "/oversight/enforcement/settled-disciplinary-orders"
+PCAOB_INSPECTIONS_PATH = "/oversight/inspections/firm-inspection-reports"
+FRC_CASE_OUTCOMES_URL = "https://www.frc.org.uk/library/enforcement/enforcement-cases/outcomes/"
+FRC_REPORTING_CASES_URL = "https://www.frc.org.uk/library/supervision/corporate-reporting-review/crr-case-summaries-and-entity-specific-press-notices/"
+ESMA_FINANCIAL_REPORTING_URL = "https://www.esma.europa.eu/issuer-disclosure/financial-reporting"
 # The unfiltered listing is intentional: FRC publishes audit inspection and
 # enforcement reviews under "Publications", not only under its investigation
 # tag. Compound topic scoring still rejects actuarial/stewardship news.
@@ -66,6 +71,7 @@ CSRC_PENALTIES_API = (
 MOF_SANCTIONS_URL = "https://www.mof.gov.cn/gp/xxgkml/jdjcj/index.htm"
 
 PUBLIC_ARTICLE_DOMAINS = {
+    "esma.europa.eu",
     "cpab-ccrc.ca",
     "fca.org.uk",
     "journalofaccountancy.com",
@@ -396,6 +402,7 @@ LOW_VALUE_PROCEDURAL_TERMS = {
 # --- 3. Source authority and scope --------------------------------------------
 
 AUTHORITATIVE_SOURCE_PREFIXES = (
+    "ESMA",
     "Canada CPAB",
     "UK FCA",
     "US DOJ",
@@ -412,6 +419,7 @@ AUTHORITATIVE_SOURCE_PREFIXES = (
     "财政部",
 )
 AUTHORITATIVE_DOMAINS = {
+    "esma.europa.eu",
     "cpab-ccrc.ca",
     "fca.org.uk",
     "justice.gov",
@@ -444,6 +452,8 @@ REGULATORY_SOURCE_PREFIXES = (
 )
 DEDICATED_FRAUD_SOURCE_PREFIXES = ("SEC Accounting & Auditing Enforcement",)
 DEDICATED_AUDIT_SOURCE_PREFIXES = (
+    "PCAOB Enforcement",
+    "PCAOB Inspections",
     "Canada CPAB",
     "AFRC",
     "ASIC",
@@ -456,6 +466,7 @@ DEDICATED_AUDIT_SOURCE_PREFIXES = (
 # so their assigned audit/reporting category should survive the generic
 # English/Chinese classifier.
 FOCUSED_DISCLOSURE_SOURCE_PREFIXES = (
+    "ESMA Financial Reporting",
     "SEC 8-K Accounting Filings",
     "Japan TDnet Audit & Reporting",
     "HKEX Audit & Reporting",
@@ -494,11 +505,13 @@ DEFAULT_WINDOW_HOURS = 24
 WEEKEND_WINDOW_HOURS = 24
 FOREIGN_WINDOW_HOURS = 168
 FOREIGN_SOURCE_PREFIXES = (
+    "ESMA",
     "SEC", "PCAOB", "UK FRC", "Thomson Reuters PCAOB", "IAASB", "ASIC",
     "Japan TDnet", "Japan CPAAOB", "Journal of Accountancy", "US DOJ",
     "UK FCA", "Canada CPAB", "Financial Times", "Google Scholar Alert",
 )
 FOREIGN_ARTICLE_DOMAINS = {
+    "esma.europa.eu",
     "sec.gov", "pcaobus.org", "frc.org.uk", "thomsonreuters.com", "iaasb.org",
     "asic.gov.au", "release.tdnet.info", "fsa.go.jp", "journalofaccountancy.com",
     "justice.gov", "fca.org.uk", "cpab-ccrc.ca", "ft.com",

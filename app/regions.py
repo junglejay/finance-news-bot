@@ -44,6 +44,8 @@ def is_foreign_article(item: ContentItem) -> bool:
 
 
 def source_window_hours(source: str, weekday: int) -> int:
+    if source == "UK FRC Reporting Cases (Topics)":
+        return 120 * 24
     if source_region(source) == "foreign":
         return FOREIGN_WINDOW_HOURS
     return WEEKEND_WINDOW_HOURS if weekday == 0 else DEFAULT_WINDOW_HOURS

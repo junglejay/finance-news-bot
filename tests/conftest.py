@@ -26,4 +26,5 @@ def settings() -> Settings:
         extra_rss_feeds=(),
         extra_article_domains=(),
         delivery_history_file="",
+        source_metrics_file="",
     )

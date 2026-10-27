@@ -8,9 +8,11 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from datetime import datetime, timezone
 
 from .config import Settings
 from .service import BriefService
+from .source_metrics import SourceMetricsStore
 
 
 async def _run_once() -> int:
@@ -53,10 +55,15 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("run-once", help="执行一次完整生产任务（抓取->AI->钉钉）")
     sub.add_parser("simulate", help="模拟一次完整任务并展示每一步结果（不真正推送钉钉）")
+    sub.add_parser("source-stats", help="查看最近30天来源可用率、正文与候选贡献（只读）")
 
     args = parser.parse_args(argv)
     if args.command == "run-once":
         return asyncio.run(_run_once())
+    if args.command == "source-stats":
+        settings = Settings.from_env()
+        print(json.dumps(SourceMetricsStore(settings.source_metrics_file).summary(datetime.now(timezone.utc)), ensure_ascii=False, indent=2))
+        return 0
     raise AssertionError(f"unhandled command: {args.command}")
 
 

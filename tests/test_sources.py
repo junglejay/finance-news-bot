@@ -990,13 +990,14 @@ def test_build_sources_is_focused_on_audit_and_regulatory_material(settings) -> 
         "Japan CPAAOB Audit Oversight",
         "HKEX Audit & Reporting",
         "中国证监会行政处罚",
-        "中国证监会要闻",
         "巨潮资讯年报问询与审计回复",
         "财政部行政处罚",
         "Thomson Reuters PCAOB",
         "Custom authority",
     } <= source_names
     assert "Guardian Business" not in source_names
+    assert "中国证监会要闻" not in source_names
+    assert "UK FCA" not in source_names
     assert "WSJ US Business" not in source_names
     assert "Yahoo Finance" not in source_names
     assert "U.S. EIA Today in Energy" not in source_names
@@ -1028,3 +1029,24 @@ def test_core_regulator_articles_are_allowed_by_default() -> None:
                 published_at=published_at,
             )
         )
+
+
+def test_broad_and_discovery_sources_need_their_respective_opt_ins(settings):
+    settings = replace(settings, optional_sources=("fca", "csrc_news"),
+                       ft_feed_url="https://example.test/ft", scholar_imap_host="mail.example.test",
+                       scholar_imap_username="test", scholar_imap_password="test")
+    production = {source.name for source in build_sources(settings)}
+    discovery = {source.name for source in build_sources(settings, include_discovery=True)}
+    assert {"UK FCA", "中国证监会要闻"} <= production
+    assert "Financial Times" not in production
+    assert "Google Scholar Alert" not in production
+    assert {"Financial Times", "Google Scholar Alert"} <= discovery
+    assert "UK FRC Reporting Cases (Topics)" not in production
+    topics = {source.name for source in build_sources(settings, include_topics=True)}
+    assert "UK FRC Reporting Cases (Topics)" in topics
+
+
+def test_sec_8k_amendment_uses_the_actual_filing_not_the_index_page():
+    html = '''<table><tr><td>1</td><td>Amended current report</td>
+        <td><a href="amendment.htm">amendment.htm</a></td><td>8-K/A</td></tr></table>'''
+    assert extract_sec_8k_primary_url(html, "https://www.sec.gov/Archives/issuer/filing-index.htm") == "https://www.sec.gov/Archives/issuer/amendment.htm"

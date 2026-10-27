@@ -392,7 +392,7 @@ def test_source_filtered_japanese_disclosure_keeps_assigned_category() -> None:
     item = score_item(
         _item(
             "Example株式会社：会計監査人の異動に関するお知らせ",
-            "TDnet 上市会社披露。",
+            "TDnet 上市会社披露。会社は不適切な会計処理を調査している。",
             source="Japan TDnet Audit & Reporting",
             url="https://www.release.tdnet.info/example.pdf",
             category=ItemCategory.PUBLIC_COMPANY_AUDIT,

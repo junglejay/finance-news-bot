@@ -26,6 +26,37 @@ class DuplicateSource(StaticSource):
 
 
 @pytest.mark.asyncio
+async def test_delivery_remembers_media_aliases_and_records_only_aggregate_metrics(settings, tmp_path):
+    import json
+    from app.history import DeliveryHistory
+    now = datetime(2026, 10, 27, tzinfo=timezone.utc)
+    primary_url = "https://www.sec.gov/newsroom/press-releases/financial-statement-fraud"
+    media_url = "https://www.journalofaccountancy.com/news/fraud-coverage/"
+    primary = ContentItem(
+        source="SEC Press Releases", title="SEC charges Listed Company X with financial statement fraud",
+        url=primary_url, published_at=now,
+        article_text="The listed company overstated revenue in its financial statements through fictitious revenue. " * 10,
+    )
+    media = primary.model_copy(deep=True, update={"source": "Journal of Accountancy", "url": media_url,
+                                               "metadata": {"primary_references": [primary_url]}})
+    source = StaticSource([primary, media])
+    source.name = primary.source
+    metrics_path = tmp_path / "metrics.json"
+    settings = replace(settings, source_metrics_file=str(metrics_path))
+    history = DeliveryHistory(str(tmp_path / "history.json"))
+    service = BriefService(settings, sources=[source], generator=FixtureGenerator(),
+                           notifier=FixtureNotifier(), history=history)
+    result = await service.run_once(now)
+    assert result.status == "success"
+    assert result.event_duplicate_count == 1
+    assert {primary_url, media_url} <= history.delivered_urls(now)
+    metrics = json.loads(metrics_path.read_text())
+    counters = metrics["days"]["2026-10-27"][primary.source]
+    assert counters["delivered_count"] == 1
+    assert all(isinstance(value, int) for value in counters.values())
+
+
+@pytest.mark.asyncio
 async def test_service_passes_each_source_its_own_window(settings):
     calls = {}
 

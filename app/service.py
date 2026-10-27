@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -13,10 +14,14 @@ from .config import Settings
 from .dingtalk import DingTalkNotifier
 from .history import DeliveryHistory
 from .models import ContentItem
+from .editorial import deduplicate_events
+from .source_metrics import SourceMetricsStore
 from .regions import source_window_hours
 from .rules import (
     MAINLAND_CHINA_SOURCES,
     MAX_MAINLAND_CHINA_CANDIDATES,
+    CATEGORY_LIMITS,
+    MIN_RELEVANCE_SCORE,
 )
 from .scoring import score_item, select_candidates
 from .sources import PublicArticleReader, Source, build_sources
@@ -34,6 +39,8 @@ class RunResult:
     readable_count: int = 0
     history_skipped_count: int = 0
     source_failures: list[str] = field(default_factory=list)
+    source_metrics: list[dict] = field(default_factory=list)
+    event_duplicate_count: int = 0
     error: str | None = None
 
     def to_dict(self) -> dict:
@@ -90,14 +97,18 @@ class BriefService:
             report_date,
             now,
         )
+        fetch_milliseconds: dict[str, int] = {}
 
         async def fetch_one(source: Source) -> tuple[Source, list[ContentItem], Exception | None]:
+            started = time.monotonic()
             try:
                 since = self._window_start(now, local_now.weekday(), source.name)
                 items = await self._fetch_source_with_retries(source, since)
                 return source, items, None
             except Exception as exc:  # Source failures are isolated from every other collector.
                 return source, [], exc
+            finally:
+                fetch_milliseconds[source.name] = round((time.monotonic() - started) * 1_000)
 
         outcomes = await asyncio.gather(*(fetch_one(source) for source in self.sources))
         for source, items, error in outcomes:
@@ -125,9 +136,31 @@ class BriefService:
             logger.warning("pre-scoring public article reading failed: %s", exc)
             result.source_failures.append(f"Public article reader: {exc}")
         scored_items = [score_item(item, now) for item in all_items]
+        eligible = [item for item in scored_items if item.category in CATEGORY_LIMITS and item.score >= MIN_RELEVANCE_SCORE]
+        event_items = deduplicate_events(eligible, delivered_urls)
+        result.event_duplicate_count = len(eligible) - len(event_items)
+
+        def record_metrics(delivered: set[str] | None = None) -> None:
+            delivered = delivered or set()
+            result.source_metrics = [
+                {"source": source.name, "runs": 1, "fetch_successes": int(error is None),
+                 "raw_count": len(items),
+                 "metadata_count": getattr(source, "collection_stats", {}).get("metadata_count", len(items)),
+                 "fetch_milliseconds": fetch_milliseconds[source.name],
+                 "evaluated_count": sum(item.source == source.name for item in scored_items),
+                 "readable_count": sum(item.source == source.name and bool(item.article_text) for item in scored_items),
+                 "eligible_count": sum(item.source == source.name for item in eligible),
+                 "event_candidate_count": sum(item.source == source.name for item in event_items),
+                 "delivered_count": sum(item.source == source.name and item.url in delivered for item in event_items)}
+                for source, items, error in outcomes
+            ]
+            try:
+                SourceMetricsStore(self.settings.source_metrics_file).record(now, result.source_metrics)
+            except (OSError, ValueError, TypeError):
+                logger.warning("could not save aggregate source metrics", exc_info=True)
 
         candidates = select_candidates(
-            scored_items,
+            event_items,
             mainland_limit=(
                 0
                 if mainland_already_delivered
@@ -139,6 +172,7 @@ class BriefService:
         if not candidates:
             await self.notifier.send_no_update(report_date.isoformat())
             result.status = "no_update"
+            record_metrics()
             return result
 
         result.readable_count = sum(bool(item.article_text) for item in candidates)
@@ -161,13 +195,17 @@ class BriefService:
             report = await self.generator.generate(report_date, candidates)
             await self.notifier.send_report(report)
             delivered_analysis_urls = [analysis.url for analysis in report.analyses]
+            delivered_aliases = set(delivered_analysis_urls)
+            for candidate in candidates:
+                if candidate.url in delivered_aliases:
+                    delivered_aliases.update(candidate.metadata.get("event_aliases", []))
             mainland_candidate_urls = {
                 item.url
                 for item in candidates
                 if item.source in MAINLAND_CHINA_SOURCES
             }
             self.history.mark_delivered(
-                delivered_analysis_urls,
+                delivered_aliases,
                 now,
                 mainland_report_date=(
                     report_date
@@ -176,12 +214,14 @@ class BriefService:
                 ),
             )
             result.status = "success"
+            record_metrics(set(delivered_analysis_urls))
             return result
         except Exception as exc:
             logger.exception("morning brief run failed")
             result.status = "failed"
             result.error = str(exc)
             await self._notify_fault_safely(str(exc))
+            record_metrics()
             return result
 
     @staticmethod

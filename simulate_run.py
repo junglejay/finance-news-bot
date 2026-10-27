@@ -31,6 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from app.ai import DeepReadingGenerator
 from app.config import Settings
 from app.history import DeliveryHistory
+from app.editorial import deduplicate_events
 from app.dingtalk import build_report_messages
 from app.models import ContentItem, DeepReadingReport
 from app.regions import is_foreign_article, source_window_hours
@@ -39,6 +40,8 @@ from app.rules import (
     MAX_AI_INPUT_CANDIDATES,
     MAX_CANDIDATES,
     MAX_MAINLAND_CHINA_CANDIDATES,
+    CATEGORY_LIMITS,
+    MIN_RELEVANCE_SCORE,
 )
 from app.scoring import score_item, select_ai_candidates, select_candidates
 from app.service import BriefService
@@ -168,7 +171,10 @@ async def amain(args: argparse.Namespace) -> int:
     all_items = [score_item(item, now) for item in all_items]
 
     # --- 2. 打分 + 选中候选 ---
-    candidates = select_candidates(all_items, mainland_limit=0 if mainland_sent else MAX_MAINLAND_CHINA_CANDIDATES)
+    eligible = [item for item in all_items if item.category in CATEGORY_LIMITS and item.score >= MIN_RELEVANCE_SCORE]
+    event_items = deduplicate_events(eligible, delivered_urls)
+    print(f"事件去重：合并或跳过 {len(eligible) - len(event_items)} 条重复报道。")
+    candidates = select_candidates(event_items, mainland_limit=0 if mainland_sent else MAX_MAINLAND_CHINA_CANDIDATES)
     ai_input = select_ai_candidates(candidates)
     ai_ids = {item.external_id for item in ai_input}
     candidate_ids = {item.external_id for item in candidates}

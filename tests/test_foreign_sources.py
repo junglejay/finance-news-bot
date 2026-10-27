@@ -132,6 +132,81 @@ async def test_cpab_uses_pdf_publication_not_effective_date_or_inspection_year(m
 
 @pytest.mark.asyncio
 @respx.mock
+@pytest.mark.parametrize("report_header", [
+    "This Order is effective as of October 15, 2026.",
+    "ENFORCEMENT REPORT - Example LLP Published October 2026",
+    "ENFORCEMENT REPORT - Example LLP Published 2026-10",
+])
+@pytest.mark.parametrize("newsletter_date, expected_count", [
+    ("October 14, 2026", 1),
+    ("October 1, 2026", 0),
+])
+async def test_cpab_undated_reports_do_not_block_express(
+    monkeypatch, report_header, newsletter_date, expected_count
+):
+    respx.get(CPAB_ENFORCEMENT_REPORTS_URL).respond(200, text='''
+        <table><tbody><tr><td>In effect from October 15, 2026</td><td>2026</td>
+        <td><a href="/report?DownloadDisclosureDocument=1">Link</a></td></tr></tbody></table>''')
+    report_url = "https://cpab-ccrc.ca/report?DownloadDisclosureDocument=1"
+    respx.get(report_url).respond(200, content=b"%PDF fixture")
+    monkeypatch.setattr(
+        "app.foreign_sources._extract_pdf_text", lambda *_: report_header + " " + BODY
+    )
+    newsletter_url = "https://secure.campaigner.com/CSB/Public/archive.aspx?args=1"
+    archive = respx.get(CPAB_EXPRESS_ARCHIVE_URL).respond(200, text=f'''
+        <div class="cpab-card-express"><a class="card-title" href="{newsletter_url}">New inspection reports</a>
+        <div class="card-footer">{newsletter_date}</div></div>''')
+    newsletter = respx.get(newsletter_url).respond(200, text=f"<p>{BODY}</p>")
+
+    items = await CPABSource().fetch(SINCE)
+
+    assert archive.called
+    assert len(items) == expected_count
+    assert newsletter.called == bool(expected_count)
+    if items:
+        assert items[0].url == newsletter_url
+        assert items[0].published_at == datetime(2026, 10, 14, tzinfo=timezone.utc)
+        assert items[0].article_text == BODY.strip()
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize("extracted_text", ["", "CPAB order"])
+async def test_cpab_text_extraction_failure_is_not_an_undated_report(
+    monkeypatch, extracted_text
+):
+    respx.get(CPAB_ENFORCEMENT_REPORTS_URL).respond(200, text='''
+        <table><tbody><tr><td><a href="/report?DownloadDisclosureDocument=1">Link</a></td></tr></tbody></table>''')
+    report_url = "https://cpab-ccrc.ca/report?DownloadDisclosureDocument=1"
+    respx.get(report_url).respond(200, content=b"%PDF fixture")
+    monkeypatch.setattr("app.foreign_sources._extract_pdf_text", lambda *_: extracted_text)
+
+    with pytest.raises(SourceFetchError, match="CPAB report text extraction failed") as error:
+        await CPABSource().fetch(SINCE)
+
+    assert report_url in str(error.value)
+    assert f"{len(extracted_text)} characters" in str(error.value)
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize("status, content", [
+    (503, b"Service unavailable"),
+    (200, b"<html>Verify you are human</html>"),
+])
+async def test_cpab_report_download_failure_remains_a_source_failure(status, content):
+    respx.get(CPAB_ENFORCEMENT_REPORTS_URL).respond(200, text='''
+        <table><tbody><tr><td><a href="/report?DownloadDisclosureDocument=1">Link</a></td></tr></tbody></table>''')
+    respx.get("https://cpab-ccrc.ca/report?DownloadDisclosureDocument=1").respond(
+        status, content=content
+    )
+
+    with pytest.raises(SourceFetchError, match="CPAB"):
+        await CPABSource().fetch(SINCE)
+
+
+@pytest.mark.asyncio
+@respx.mock
 @pytest.mark.parametrize("content", ["<html>Verify you are human</html>", "<rss><broken>"])
 async def test_rss_challenge_page_does_not_look_like_zero_news(content):
     respx.get(FCA_NEWS_RSS).respond(200, text=content)
@@ -150,7 +225,36 @@ async def test_readable_official_rss_with_unescaped_ampersand_is_preserved():
     assert items[0].title == "Accounting & auditing"
 
 
-def test_four_new_sources_are_enabled(settings):
-    assert {"Journal of Accountancy", "US DOJ Accounting Enforcement", "UK FCA", "Canada CPAB"} <= {
+def test_focused_sources_are_enabled_and_fca_is_optional(settings):
+    names = {source.name for source in build_sources(settings)}
+    assert "UK FCA" not in names
+    assert {"Journal of Accountancy", "US DOJ Accounting Enforcement", "Canada CPAB"} <= {
         source.name for source in build_sources(settings)
     }
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_doj_downloads_only_focused_articles_after_metadata_paging():
+    row = _doj_row("accounting-case", 22)
+    row.pop("body")
+    noise = _doj_row("unrelated-case", 22)
+    noise.pop("body")
+    noise["title"] = "Drug trafficker sentenced to prison"
+    def metadata(request):
+        assert request.url.params["fields"] == "title,url,date,uuid"
+        return Response(200, json={"metadata": {}, "results": [row, noise]})
+    respx.get(DOJ_PRESS_RELEASES_API).mock(side_effect=metadata)
+    detail = respx.get(row["url"]).respond(200, text=f"<main><p>{BODY}</p></main>")
+    items = await DOJPressSource().fetch(SINCE)
+    assert detail.call_count == 1
+    assert [item.url for item in items] == [row["url"]]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_joa_general_tax_and_career_cards_do_not_trigger_article_downloads():
+    respx.get(JOA_NEWS_URL).respond(200, text='''
+        <article><time datetime="2026-10-22T12:00:00Z"></time>
+        <h2 class="entry-title"><a href="/news/tax/">Tax preparer receives a professional award</a></h2></article>''')
+    assert await JournalOfAccountancySource().fetch(SINCE) == []

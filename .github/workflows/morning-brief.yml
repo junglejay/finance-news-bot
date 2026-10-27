@@ -36,6 +36,8 @@ jobs:
       EXTRA_RSS_FEEDS: ${{ vars.EXTRA_RSS_FEEDS }}
       EXTRA_ARTICLE_DOMAINS: ${{ vars.EXTRA_ARTICLE_DOMAINS }}
       DELIVERY_HISTORY_FILE: .cache/delivered_urls.json
+      SOURCE_METRICS_FILE: .cache/source_metrics.json
+      OPTIONAL_SOURCES: ${{ vars.OPTIONAL_SOURCES }}
 
     steps:
       - uses: actions/checkout@v4
@@ -43,7 +45,9 @@ jobs:
       - name: Restore delivered URL history
         uses: actions/cache/restore@v4
         with:
-          path: .cache/delivered_urls.json
+          path: |
+            .cache/delivered_urls.json
+            .cache/source_metrics.json
           key: audit-news-history-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             audit-news-history-
@@ -61,8 +65,10 @@ jobs:
         run: python -m app.cli run-once
 
       - name: Save delivered URL history
-        if: success()
+        if: always() && !cancelled()
         uses: actions/cache/save@v4
         with:
-          path: .cache/delivered_urls.json
+          path: |
+            .cache/delivered_urls.json
+            .cache/source_metrics.json
           key: audit-news-history-${{ github.run_id }}-${{ github.run_attempt }}

@@ -60,3 +60,8 @@ def test_extra_feed_and_article_domain_configuration(monkeypatch) -> None:
         ("Authority two", "https://two.example/feed"),
     )
     assert settings.extra_article_domains == ("one.example", "two.example")
+
+
+def test_broad_sources_are_explicit_opt_ins(monkeypatch):
+    monkeypatch.setenv("OPTIONAL_SOURCES", "fca, CSRC_NEWS")
+    assert Settings.from_env().optional_sources == ("fca", "csrc_news")

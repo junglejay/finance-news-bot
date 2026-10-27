@@ -13,6 +13,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from .models import ContentItem, ItemCategory
+from .editorial import focused_news_title, primary_references
 from .rules import (
     CPAB_ENFORCEMENT_REPORTS_URL,
     CPAB_EXPRESS_ARCHIVE_URL,
@@ -53,6 +54,7 @@ class JournalOfAccountancySource(Source):
     _MAX_PAGES = 20
 
     async def fetch(self, since: datetime) -> list[ContentItem]:
+        self.collection_stats = {"metadata_count": 0, "detail_requests": 0}
         items: list[ContentItem] = []
         visited: set[str] = set()
         page_url = JOA_NEWS_URL
@@ -69,6 +71,7 @@ class JournalOfAccountancySource(Source):
                     cards = soup.select("article .entry-title a")
                     if not cards:
                         raise SourceFetchError("JOA listing contains no news cards")
+                    self.collection_stats["metadata_count"] += len(cards)
                     dates: list[datetime] = []
                     pending: list[tuple[str, str]] = []
                     for anchor in cards:
@@ -79,11 +82,12 @@ class JournalOfAccountancySource(Source):
                         url = urljoin(page_url, anchor["href"])
                         if urlsplit(url).hostname != "www.journalofaccountancy.com":
                             raise SourceFetchError("JOA listing contains an unexpected article host")
-                        if published >= since:
+                        if published >= since and focused_news_title(_clean_text(anchor.get_text(" "))):
                             pending.append((_clean_text(anchor.get_text(" ")), url))
 
                     async def read(title: str, url: str) -> ContentItem | None:
                         async with semaphore:
+                            self.collection_stats["detail_requests"] += 1
                             detail = await client.get(url)
                             detail.raise_for_status()
                         article = BeautifulSoup(detail.text, "html.parser")
@@ -97,7 +101,11 @@ class JournalOfAccountancySource(Source):
                             source=self.name, title=title, url=url,
                             published_at=published, summary=text[:2_000],
                             article_text=text if len(text) >= MIN_ARTICLE_CHARS else "",
-                            metadata={"listing_url": JOA_NEWS_URL, "date_field": "article:published_time"},
+                            metadata={
+                                "listing_url": JOA_NEWS_URL,
+                                "date_field": "article:published_time",
+                                "primary_references": primary_references(detail.text, url),
+                            },
                         )
 
                     items.extend(item for item in await asyncio.gather(*(read(*row) for row in pending)) if item)
@@ -122,6 +130,7 @@ class DOJPressSource(Source):
     _REQUEST_INTERVAL = 0.3  # Official API permits at most four requests/second.
 
     async def fetch(self, since: datetime) -> list[ContentItem]:
+        self.collection_stats = {"metadata_count": 0, "detail_requests": 0}
         items: list[ContentItem] = []
         visited: set[tuple[str, ...]] = set()
         try:
@@ -131,7 +140,7 @@ class DOJPressSource(Source):
                         await asyncio.sleep(self._REQUEST_INTERVAL)
                     response = await client.get(DOJ_PRESS_RELEASES_API, params={
                         "sort": "date", "direction": "DESC", "pagesize": self._PAGE_SIZE,
-                        "page": page, "fields": "title,url,date,uuid,body",
+                        "page": page, "fields": "title,url,date,uuid",
                     })
                     response.raise_for_status()
                     payload = response.json()
@@ -142,6 +151,7 @@ class DOJPressSource(Source):
                         raise SourceFetchError("DOJ API returned an invalid release")
                     if not rows:
                         return _unique_by_url(items)
+                    self.collection_stats["metadata_count"] += len(rows)
                     fingerprint = tuple(str(row.get("uuid") or row.get("url")) for row in rows)
                     if fingerprint in visited:
                         raise SourceFetchError("DOJ API repeated a page")
@@ -158,9 +168,18 @@ class DOJPressSource(Source):
                             raise SourceFetchError("DOJ API returned an unexpected article host")
                         if not _day_in_window(published, since, "America/New_York"):
                             continue
-                        text = _clean_text(row.get("body", ""))[:MAX_ARTICLE_CHARS]
+                        title = _clean_text(row.get("title", ""))
+                        if not focused_news_title(title):
+                            continue
+                        if row.get("body"):
+                            text = _clean_text(row["body"])[:MAX_ARTICLE_CHARS]
+                        else:
+                            self.collection_stats["detail_requests"] += 1
+                            detail = await client.get(url)
+                            detail.raise_for_status()
+                            text = _extract_public_article_text(detail.text, MAX_ARTICLE_CHARS)
                         items.append(ContentItem(
-                            source=self.name, title=_clean_text(row.get("title", "")), url=url,
+                            source=self.name, title=title, url=url,
                             published_at=published, summary=text[:2_000],
                             article_text=text if len(text) >= MIN_ARTICLE_CHARS else "",
                             metadata={"api_url": str(response.url), "date_precision": "day", "date_field": "date"},
@@ -208,9 +227,17 @@ class CPABSource(Source):
                     if not response.content.startswith(b"%PDF"):
                         raise SourceFetchError("CPAB report is not a PDF")
                     text = _extract_pdf_text(response.content, MAX_ARTICLE_CHARS)
+                    if len(text) < MIN_ARTICLE_CHARS:
+                        raise SourceFetchError(
+                            f"CPAB report text extraction failed ({len(text)} characters): {url}"
+                        )
                     match = re.search(r"\bPublished\s*:?\s+(\d{4}[-\u2010-\u2015]\d{2}[-\u2010-\u2015]\d{2})", text, re.I)
                     if not match:
-                        logger.warning("CPAB report has no precise Published date: %s", url)
+                        logger.info(
+                            "CPAB report skipped: readable PDF has no precise Published date; "
+                            "effective dates are not publication dates: %s",
+                            url,
+                        )
                         return None
                     published = _date(re.sub(r"[\u2010-\u2015]", "-", match[1]))
                     dated_reports += 1
@@ -224,8 +251,17 @@ class CPABSource(Source):
                     )
 
                 reports = await asyncio.gather(*(report(url) for url in urls))
-                if not dated_reports:
-                    raise SourceFetchError("CPAB reports contain no precise publication dates")
+                logger.info(
+                    "CPAB enforcement reports: %d readable, %d with publication dates, "
+                    "%d skipped without publication dates, %d in window",
+                    len(urls),
+                    dated_reports,
+                    len(urls) - dated_reports,
+                    sum(item is not None for item in reports),
+                )
+                # Valid orders can omit publication dates entirely. Their
+                # exclusion must not prevent independent dated Express news
+                # from being collected, even when every order is undated.
                 response = await client.get(CPAB_EXPRESS_ARCHIVE_URL)
                 response.raise_for_status()
                 archive = BeautifulSoup(response.text, "html.parser")

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """查看各订阅源抓取到的原始新闻。
 
-只做 fetch（标题/链接/摘要/日期/分类），不调用 AI、不发钉钉、不读取正文，
+只做 fetch（标题/链接/摘要/日期/分类），不调用 AI、不发钉钉，部分源会读取公开正文，
 方便确认每个源当前能抓到哪些条目。
 
 用法:
@@ -117,7 +117,11 @@ def _print_report(
         if since_by_source:
             print(f"  since = {since_by_source[name].isoformat()}")
         for item in items:
-            pub = item.published_at.strftime("%Y-%m-%d %H:%M UTC")
+            pub = (
+                item.metadata["publication_label"] + "（仅季度，专题材料）"
+                if item.metadata.get("date_precision") == "quarter"
+                else item.published_at.strftime("%Y-%m-%d %H:%M UTC")
+            )
             print(f"  - {item.title}")
             print(f"    {pub} | {item.category} | {item.url}")
             if item.summary:
@@ -157,7 +161,10 @@ def _dump_json(
                     "title": it.title,
                     "url": it.url,
                     "category": str(it.category),
-                    "published_at": it.published_at.isoformat(),
+                    "published_at": None if it.metadata.get("period_anchor_only") else it.published_at.isoformat(),
+                    "date_precision": it.metadata.get("date_precision", "instant"),
+                    "publication_label": it.metadata.get("publication_label"),
+                    "topic_only": it.metadata.get("topic_only", False),
                     "summary": it.summary,
                 }
                 for it in items
@@ -173,7 +180,7 @@ async def amain(args: argparse.Namespace) -> int:
     fetched_at = datetime.now(timezone.utc)
     since, window_desc = _resolve_window(args.hours, fetched_at, settings.timezone)
 
-    sources = build_sources(settings)
+    sources = build_sources(settings, include_discovery=True, include_topics=getattr(args, "topics", False))
     if args.source:
         keys = [k.lower() for k in args.source]
         sources = [s for s in sources if any(k in s.name.lower() for k in keys)]
@@ -203,6 +210,7 @@ def main() -> int:
         help="只抓名称包含该子串的源（可多次指定，如 --source 证监会 --source SEC）",
     )
     parser.add_argument("--json", action="store_true", help="输出 JSON，便于管道处理")
+    parser.add_argument("--topics", action="store_true", help="包含仅供专题阅读的季度材料，不进入日常 AI 候选")
     parser.add_argument("--env", default=".env", help="环境变量文件路径（默认 .env）")
     args = parser.parse_args()
     return asyncio.run(amain(args))

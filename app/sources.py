@@ -24,6 +24,7 @@ from dateutil import parser as date_parser, tz
 
 from .config import Settings
 from .models import ContentItem, ItemCategory
+from .editorial import primary_references
 from .rules import (
     AFRC_PRESS_RELEASES_URL,
     ARTICLE_READER_CONCURRENCY,
@@ -203,7 +204,7 @@ def extract_sec_8k_primary_url(index_html: str, index_url: str) -> str:
             continue
         document_type = _clean_text(cells[3].get_text(" "))
         anchor = row.find("a", href=True)
-        if anchor is not None and document_type.casefold() == "8-k":
+        if anchor is not None and document_type.casefold() in {"8-k", "8-k/a"}:
             return _sec_direct_document_url(urljoin(index_url, anchor["href"]))
     return ""
 
@@ -801,6 +802,7 @@ class PublicArticleReader:
                 article_text = _extract_pdf_text(response.content, self.max_characters)
             elif "html" in content_type:
                 article_text = _extract_public_article_text(response.text, self.max_characters)
+                item.metadata["primary_references"] = primary_references(response.text, item.url)
             else:
                 item.metadata["article_read_status"] = "skipped_non_html"
                 logger.debug(f"Skipping {item.source} - non-HTML content type: {content_type}")
@@ -1625,7 +1627,12 @@ class PCAOBNewsSource(Source):
                         f"PCAOB public news search failed: listing/current configuration: {primary_error}; "
                         f"public search fallback: {fallback_error}"
                     ) from fallback_error
-                logger.warning("PCAOB listing/current search failed; used public search fallback: %s", primary_error)
+                logger.info(
+                    "PCAOB public search fallback succeeded (%d recent releases); "
+                    "listing/current configuration unavailable: %s",
+                    len(items),
+                    primary_error,
+                )
                 return items
 
     @staticmethod
@@ -2036,8 +2043,11 @@ def _unique_by_url(items: Iterable[ContentItem]) -> list[ContentItem]:
     return unique
 
 
-def build_sources(settings: Settings) -> list[Source]:
+def build_sources(
+    settings: Settings, *, include_discovery: bool = False, include_topics: bool = False
+) -> list[Source]:
     from .foreign_sources import CPABSource, DOJPressSource, JournalOfAccountancySource
+    from .specialist_sources import ESMAReportingSource, FRCEnforcementSource, FRCReportingCasesSource, PCAOBDocumentsSource
 
     sources: list[Source] = [
         RSSSource(
@@ -2050,9 +2060,12 @@ def build_sources(settings: Settings) -> list[Source]:
         RSSSource("SEC Administrative Proceedings", SEC_ADMIN_PROCEEDINGS_RSS),
         SEC8KAccountingSource(settings.sec_user_agent),
         PCAOBNewsSource(),
+        PCAOBDocumentsSource("enforcement"),
+        PCAOBDocumentsSource("inspections"),
+        FRCEnforcementSource(),
+        ESMAReportingSource(),
         JournalOfAccountancySource(),
         DOJPressSource(),
-        RSSSource("UK FCA", FCA_NEWS_RSS),
         CPABSource(),
         DatedListingSource(
             "UK FRC Audit & Reporting",
@@ -2069,7 +2082,6 @@ def build_sources(settings: Settings) -> list[Source]:
             "America/New_York",
         ),
         CSRCJSONSource("中国证监会行政处罚", CSRC_PENALTIES_API),
-        CSRCJSONSource("中国证监会要闻", CSRC_NEWS_API),
         CNInfoAnnouncementSource(),
         MinistryOfFinanceSanctionsSource(),
         ASICJSONSource(),
@@ -2083,9 +2095,15 @@ def build_sources(settings: Settings) -> list[Source]:
             date_timezone="Asia/Hong_Kong",
         ),
     ]
+    if include_topics:
+        sources.append(FRCReportingCasesSource())
+    if "fca" in settings.optional_sources:
+        sources.append(RSSSource("UK FCA", FCA_NEWS_RSS))
+    if "csrc_news" in settings.optional_sources:
+        sources.append(CSRCJSONSource("中国证监会要闻", CSRC_NEWS_API))
     for name, feed_url in settings.extra_rss_feeds:
         sources.append(RSSSource(name, feed_url))
-    if settings.ft_enabled:
+    if include_discovery and settings.ft_enabled:
         if settings.ft_feed_url:
             sources.append(RSSSource("Financial Times", settings.ft_feed_url))
         if settings.ft_email_sender and settings.scholar_enabled:
@@ -2099,7 +2117,7 @@ def build_sources(settings: Settings) -> list[Source]:
                     settings.ft_email_sender,
                 )
             )
-    if settings.scholar_enabled:
+    if include_discovery and settings.scholar_enabled:
         sources.append(
             ScholarAlertSource(
                 settings.scholar_imap_host,

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from .models import ContentItem, ItemCategory
+from .editorial import deduplicate_events, low_value_reason, source_priority
 from .regions import is_foreign_article
 from .rules import (
     AUDIT_QUALITY_TERMS,
@@ -74,6 +75,12 @@ def _is_authoritative(item: ContentItem) -> bool:
 def score_item(item: ContentItem, now: datetime | None = None) -> ContentItem:
     """Classify only articles that satisfy a compound audit/reporting topic gate."""
     now = now or datetime.now(timezone.utc)
+    skip_reason = low_value_reason(item)
+    if skip_reason:
+        item.category = ItemCategory.OTHER
+        item.score = 0
+        item.score_reasons = [skip_reason]
+        return item
     # Some official feeds expose respondent names or generic headlines only.
     # When public full text has already been read, classify against it as well
     # so a relevant case is not discarded before the AI stage.
@@ -156,6 +163,11 @@ def score_item(item: ContentItem, now: datetime | None = None) -> ContentItem:
         item.category = ItemCategory.PUBLIC_COMPANY_AUDIT
     elif reporting_hits and issuer_hits:
         item.category = ItemCategory.REPORTING_CONTROLS
+    elif item.source == "Journal of Accountancy" and re.search(
+        r"\b(?:FASB|IASB|IFRIC)\b.*\b(?:accounting|standards?|recognition|disclosures?|payments?|inconsistencies)\b",
+        item.title, re.I,
+    ):
+        item.category = ItemCategory.REPORTING_CONTROLS
     else:
         item.category = ItemCategory.OTHER
 
@@ -220,12 +232,13 @@ def select_candidates(
     mainland_limit: int = MAX_MAINLAND_CHINA_CANDIDATES,
 ) -> list[ContentItem]:
     """Select a focused, category-balanced pool without unrelated backfilling."""
-    ranked = sorted(items, key=lambda item: (item.score, item.published_at), reverse=True)
+    ranked = sorted(items, key=lambda item: (source_priority(item), item.score, item.published_at), reverse=True)
     eligible = [
         item
         for item in ranked
         if item.category in CATEGORY_LIMITS and item.score >= MIN_RELEVANCE_SCORE
     ]
+    eligible = deduplicate_events(eligible)
 
     selected: list[ContentItem] = []
     selected_ids: set[str] = set()
@@ -238,7 +251,12 @@ def select_candidates(
             return
         if item.external_id in selected_ids:
             return
-        if source_counts[item.source] >= MAX_ITEMS_PER_SOURCE:
+        source_key = item.source
+        if item.source in {"PCAOB", "PCAOB Enforcement", "PCAOB Inspections"}:
+            source_key = "PCAOB"
+        elif item.source in {"UK FRC Audit & Reporting", "UK FRC Enforcement Outcomes"}:
+            source_key = "UK FRC"
+        if source_counts[source_key] >= MAX_ITEMS_PER_SOURCE:
             return
         if (
             item.source in MAINLAND_CHINA_SOURCES
@@ -247,7 +265,7 @@ def select_candidates(
             return
         selected.append(item)
         selected_ids.add(item.external_id)
-        source_counts[item.source] += 1
+        source_counts[source_key] += 1
         if item.source in MAINLAND_CHINA_SOURCES:
             mainland_count += 1
 
@@ -268,7 +286,7 @@ def select_candidates(
 
     return sorted(
         selected,
-        key=lambda item: (is_foreign_article(item), item.score, item.published_at),
+        key=lambda item: (is_foreign_article(item), source_priority(item), item.score, item.published_at),
         reverse=True,
     )
 
@@ -276,7 +294,7 @@ def select_candidates(
 def select_ai_candidates(items: list[ContentItem]) -> list[ContentItem]:
     """Apply the same foreign-first order to the ten readable AI inputs."""
     return sorted(
-        (item for item in items if item.article_text),
-        key=lambda item: (is_foreign_article(item), item.score, item.published_at),
+        deduplicate_events([item for item in items if item.article_text and not low_value_reason(item)]),
+        key=lambda item: (is_foreign_article(item), source_priority(item), item.score, item.published_at),
         reverse=True,
     )[:MAX_AI_INPUT_CANDIDATES]
